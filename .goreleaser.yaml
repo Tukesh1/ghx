@@ -1,0 +1,55 @@
+# GoReleaser config: builds ghx for macOS, Linux and Windows and publishes a GitHub release.
+# Archive names carry no version so install.sh can use the stable
+# https://github.com/Tukesh1/ghx/releases/latest/download/<asset> URLs.
+version: 2
+project_name: ghx
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: ghx
+    main: .
+    binary: ghx
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .ShortCommit }} -X main.date={{ .Date }}
+
+archives:
+  - id: ghx
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: Tukesh1
+    name: ghx
+  footer: |
+    **Install:** `curl -fsSL https://raw.githubusercontent.com/Tukesh1/ghx/main/install.sh | sh`
