@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Tukesh1/ghx/main/install.sh | sh
 #
 # Options (environment variables):
-#   GHX_VERSION=v0.2.0       install a specific release instead of the latest
+#   GHX_VERSION=v0.1.0       install a specific release instead of the latest
 #   GHX_INSTALL_DIR=~/bin    install somewhere other than /usr/local/bin or ~/.local/bin
 #   GHX_BASE_URL=...         download from a mirror (used by tests)
 #

@@ -27,6 +27,6 @@ layout changes without a TTY.
 
 ## Releasing
 
-Push a tag: `git tag v0.3.0 && git push origin v0.3.0`. The Release workflow runs GoReleaser, which
+Push a tag: `git tag v0.2.0 && git push origin v0.2.0`. The Release workflow runs GoReleaser, which
 builds macOS/Linux/Windows binaries, publishes `ghx_<os>_<arch>` archives with `checksums.txt`,
 and `install.sh` picks them up automatically.

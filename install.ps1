@@ -2,7 +2,7 @@
 #
 #   irm https://raw.githubusercontent.com/Tukesh1/ghx/main/install.ps1 | iex
 #
-# Options: $env:GHX_VERSION = "v0.2.0"; $env:GHX_INSTALL_DIR = "C:\tools"
+# Options: $env:GHX_VERSION = "v0.1.0"; $env:GHX_INSTALL_DIR = "C:\tools"
 
 $ErrorActionPreference = "Stop"
 $repo = "Tukesh1/ghx"

@@ -45,7 +45,7 @@ The installer downloads the prebuilt binary for your OS and CPU from the latest
 
 ```sh
 # A specific version, or a custom location
-curl -fsSL https://raw.githubusercontent.com/Tukesh1/ghx/main/install.sh | GHX_VERSION=v0.2.0 GHX_INSTALL_DIR=~/bin sh
+curl -fsSL https://raw.githubusercontent.com/Tukesh1/ghx/main/install.sh | GHX_VERSION=v0.1.0 GHX_INSTALL_DIR=~/bin sh
 
 # With Go 1.22+
 go install github.com/Tukesh1/ghx@latest

@@ -26,9 +26,9 @@ var (
 	date    = ""
 )
 
-// versionString reports the release version, falling back to module info for `go install` builds.
-func versionString() string {
-	v, c := version, commit
+// resolveVersion returns the release version and commit, falling back to module info for `go install` builds.
+func resolveVersion() (v, c string) {
+	v, c = version, commit
 	if v == "dev" {
 		if info, ok := debug.ReadBuildInfo(); ok {
 			if info.Main.Version != "" && info.Main.Version != "(devel)" {
@@ -41,6 +41,12 @@ func versionString() string {
 			}
 		}
 	}
+	return v, c
+}
+
+// versionString is the --version output, e.g. "ghx 0.1.0 (d9cb70e, 2026-10-27T…)".
+func versionString() string {
+	v, c := resolveVersion()
 	out := "ghx " + v
 	if c != "" {
 		out += " (" + c
@@ -95,6 +101,7 @@ func main() {
 		return
 	}
 
+	ui.Version, _ = resolveVersion()
 	cfg := config.New(*theme, *org, *demo, *ascii, *check)
 
 	var client *gh.Client

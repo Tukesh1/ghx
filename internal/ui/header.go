@@ -8,7 +8,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const appVersion = "v0.2"
+// Version is the build version shown in the header badge; main sets it from the release ldflags.
+var Version = "dev"
+
+func versionBadge() string {
+	if Version == "" || Version == "dev" || strings.HasPrefix(Version, "v") {
+		return Version
+	}
+	return "v" + Version
+}
 
 type headerItem struct {
 	s    string
@@ -35,7 +43,7 @@ func joinFitting(items []headerItem, sep string, w int) string {
 // header renders the top bar: brand, @user, context switcher, glyph/theme fields, inbox and keys buttons, clock.
 func (m Model) header(w int) string {
 	p := m.p
-	brand := p.bold(p.TextPrimary, p.ic.Github+" ghx") + " " + p.badge(p.Blue, appVersion)
+	brand := p.bold(p.TextPrimary, p.ic.Github+" ghx") + " " + p.badge(p.Blue, versionBadge())
 	user := p.fg(p.Green, "●") + " " + p.bold(p.TextPrimary, "@"+m.data.User.Login)
 	ctx := fmt.Sprintf("Context: All Repositories (%d)", len(m.data.Repos))
 	if m.cfg.Org != "" {
