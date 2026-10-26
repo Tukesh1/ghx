@@ -116,7 +116,9 @@ main() {
 	*":$dir:"*) ;;
 	*)
 		warn "$dir is not on your PATH. Add this to your shell profile:"
-		printf '\n    export PATH="%s:$PATH"\n\n' "$dir"
+		echo
+		echo "    export PATH=\"$dir:\$PATH\""
+		echo
 		;;
 	esac
 

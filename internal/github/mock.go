@@ -327,12 +327,15 @@ func MockDashboard() *Dashboard {
 		start = start.AddDate(0, 0, -1)
 	}
 	for t := start; !t.After(today); t = t.AddDate(0, 0, 1) {
-		days := int(today.Sub(t).Hours() / 24)
+		days := int(math.Round(today.Sub(t).Hours() / 24)) // round: DST days are 23h or 25h long
 		weekday := int(t.Weekday())
 		var count int
 		switch {
 		case days < 47:
 			count = 1 + r.Intn(14)
+		case days == 47:
+			// A rest day right before the streak keeps it exactly 47 days on any date or timezone.
+			count = 0
 		case weekday == 0 || weekday == 6:
 			if r.Float64() < 0.35 {
 				count = r.Intn(5)
