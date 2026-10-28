@@ -13,6 +13,8 @@ type Icons struct {
 	Skip, Github, Search, Inbox   string
 	Ahead, Behind, Arrow, Pending string
 	Pulse, File, Zap, Code        string
+	Org, Location, Link, Calendar string
+	Pin                           string
 	Spinner                       []string
 }
 
@@ -54,6 +56,11 @@ var nerdIcons = Icons{
 	File:        "\uf40d",
 	Zap:         "\uf0e7",
 	Code:        "\uf44f",
+	Org:         "\uf42b",
+	Location:    "\uf450",
+	Link:        "\uf44c",
+	Calendar:    "\uf455",
+	Pin:         "\uf435",
 	Spinner:     []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 }
 
@@ -97,6 +104,11 @@ var unicodeIcons = Icons{
 	File:        "▭",
 	Zap:         "ϟ",
 	Code:        "⌘",
+	Org:         "⌂",
+	Location:    "⌖",
+	Link:        "↗",
+	Calendar:    "◫",
+	Pin:         "✦",
 	Spinner:     []string{"◐", "◓", "◑", "◒"},
 }
 

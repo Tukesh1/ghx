@@ -29,12 +29,8 @@ func (m Model) kpis() []kpi {
 	p := m.p
 	d := m.data
 	failing, running := d.RunCounts()
-	approved := 0
 	ciPass, ciFail, ciRun, changes := 0, 0, 0, 0
 	for _, pr := range d.MyPRs {
-		if pr.ReviewDecision == gh.ReviewApproved {
-			approved++
-		}
 		if pr.ReviewDecision == gh.ReviewChangesRequested {
 			changes++
 		}
@@ -48,11 +44,17 @@ func (m Model) kpis() []kpi {
 		}
 	}
 	checks := p.badge(p.Green, p.ic.CheckPass+" Checks Pass")
-	if ciFail > 0 {
+	switch {
+	case ciFail > 0:
 		checks = p.badge(p.Red, p.ic.CheckFail+" Checks Fail")
+	case len(d.MyPRs) == 0:
+		checks = p.badge(p.TextSecondary, "Open PR →")
 	}
-	ciAccent, ciBadge := p.Red, p.badge(p.Red, "Inspect Logs →")
-	if failing == 0 {
+	ciAccent, ciBadge := p.Red, p.badge(p.Red, "Logs →")
+	switch {
+	case len(d.Runs) == 0:
+		ciAccent, ciBadge = p.TextSecondary, p.badge(p.TextSecondary, "No Runs")
+	case failing == 0:
 		ciAccent, ciBadge = p.Green, p.badge(p.Green, p.ic.CheckPass+" All Green")
 	}
 	var milestone *gh.Issue
@@ -67,23 +69,30 @@ func (m Model) kpis() []kpi {
 		msBadge = p.badge(p.Purple, fmt.Sprintf("%s: %.0f%%", milestone.Milestone, milestone.MilestonePct))
 	}
 
+	var oldest gh.PullRequest
+	for i, pr := range d.ReviewPRs {
+		if i == 0 || pr.UpdatedAt.Before(oldest.UpdatedAt) {
+			oldest = pr
+		}
+	}
+	reviewDetail, reviewBrief := "· queue clear", "· clear"
+	if len(d.ReviewPRs) > 0 {
+		reviewDetail, reviewBrief = "· oldest "+ago(oldest.UpdatedAt), "· "+ago(oldest.UpdatedAt)
+	}
 	reviewExtra := func(w int) string {
 		if len(d.ReviewPRs) == 0 {
-			return firstFit(w, p.fg(p.Green, p.ic.CheckPass+" queue clear"))
+			return firstFit(w, p.fg(p.Green, p.ic.CheckPass+" nobody is waiting on you"), p.fg(p.Green, p.ic.CheckPass+" all clear"))
 		}
-		oldest := d.ReviewPRs[0]
-		for _, pr := range d.ReviewPRs {
-			if pr.UpdatedAt.Before(oldest.UpdatedAt) {
-				oldest = pr
-			}
-		}
-		num := p.fg(p.Yellow, fmt.Sprintf("#%d", oldest.Number))
+		next := d.ReviewPRs[0]
+		num := p.fg(p.Yellow, fmt.Sprintf("#%d", next.Number))
 		return firstFit(w,
-			p.muted("oldest ")+num+p.muted(" · "+ago(oldest.UpdatedAt)+" · @"+oldest.Author),
-			p.muted("oldest ")+num+p.muted(" · "+ago(oldest.UpdatedAt)),
-			num+p.muted(" "+ago(oldest.UpdatedAt)))
+			p.muted("next ")+num+" "+p.text(next.Title),
+			num+" "+p.text(next.Title))
 	}
 	prExtra := func(w int) string {
+		if len(d.MyPRs) == 0 {
+			return p.muted("no open pull requests")
+		}
 		ci := p.fg(p.Green, fmt.Sprintf("%s%d", p.ic.CheckPass, ciPass)) + " " +
 			p.fg(p.Red, fmt.Sprintf("%s%d", p.ic.CheckFail, ciFail)) + " " + p.fg(p.Yellow, fmt.Sprintf("%s%d", p.ic.Running, ciRun))
 		return firstFit(w,
@@ -100,6 +109,9 @@ func (m Model) kpis() []kpi {
 					p.fg(p.Red, r.Name)+p.muted(" "+ago(r.StartedAt)))
 			}
 		}
+		if len(d.Runs) == 0 {
+			return p.muted("no recent workflow runs")
+		}
 		return firstFit(w, p.fg(p.Green, p.ic.CheckPass+" every workflow passing"), p.fg(p.Green, p.ic.CheckPass+" all passing"))
 	}
 	issueExtra := func(w int) string {
@@ -110,6 +122,9 @@ func (m Model) kpis() []kpi {
 		count := map[string]int{}
 		for _, is := range d.Issues {
 			count[is.Priority]++
+		}
+		if len(d.Issues) == 0 {
+			return firstFit(w, p.fg(p.Green, p.ic.CheckPass+" nothing assigned to you"), p.fg(p.Green, p.ic.CheckPass+" none assigned"))
 		}
 		return p.fg(p.Red, fmt.Sprintf("P0 %d", count["P0"])) + p.muted(" · ") + p.fg(p.Yellow, fmt.Sprintf("P1 %d", count["P1"])) + p.muted(fmt.Sprintf(" · P2+ %d", count["P2"]+count["P3"]))
 	}
@@ -131,11 +146,11 @@ func (m Model) kpis() []kpi {
 	}
 
 	return []kpi{
-		{"PRs Needing Your Review", "Review Queue", fmt.Sprintf("%d Waiting", len(d.ReviewPRs)), fmt.Sprintf("· %d Approved", approved), fmt.Sprintf("· %d ok", approved), p.TextSecondary, p.Yellow, p.badge(p.Yellow, "Review Queue →"), reviewExtra, len(d.ReviewPRs) > 0, tabPRs},
+		{"PRs Needing Your Review", "Review Queue", fmt.Sprintf("%d Waiting", len(d.ReviewPRs)), reviewDetail, reviewBrief, p.TextSecondary, p.Yellow, p.badge(p.Yellow, "Review →"), reviewExtra, len(d.ReviewPRs) > 0, tabPRs},
 		{"Your Open PRs", "Your PRs", fmt.Sprintf("%d Active", len(d.MyPRs)), fmt.Sprintf("· %d Merge-Ready", d.MergeReadyCount()), fmt.Sprintf("· %d ready", d.MergeReadyCount()), p.TextSecondary, p.Green, checks, prExtra, false, tabPRs},
 		{"Actions CI/CD Status", "Actions CI/CD", fmt.Sprintf("%d Failing", failing), fmt.Sprintf("· %d Running", running), fmt.Sprintf("· %d run", running), p.Cyan, ciAccent, ciBadge, ciExtra, failing > 0, tabActions},
 		{"Assigned Issues", "Issues", fmt.Sprintf("%d Open", len(d.Issues)), fmt.Sprintf("· %d P0-Blocker", d.BlockerCount()), fmt.Sprintf("· %d P0", d.BlockerCount()), p.Red, p.TextPrimary, msBadge, issueExtra, d.BlockerCount() > 0, tabIssues},
-		{"Recent Commits (30d)", "Commits 30d", fmt.Sprintf("%d Commits", d.ContributionsSince(30)), fmt.Sprintf("· %dd Streak", d.Streak()), fmt.Sprintf("· %dd", d.Streak()), p.Green, p.Blue, p.badge(p.Blue, fmt.Sprintf("%d Active Repos", len(d.Repos))), commitExtra, false, tabRepos},
+		{"Contributions (30d)", "Activity 30d", commaInt(d.ContributionsSince(30)), fmt.Sprintf("· %dd streak", d.Streak()), fmt.Sprintf("· %dd", d.Streak()), p.Green, p.Blue, p.badge(p.Blue, plural(len(d.Repos), "repo")), commitExtra, false, tabRepos},
 	}
 }
 

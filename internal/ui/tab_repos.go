@@ -9,7 +9,7 @@ import (
 )
 
 var repoCols = []column{
-	{title: "Repository", width: -2, min: 22},
+	{title: "Repository", width: -2, min: 22, mid: true},
 	{title: "Vis", width: 9, drop: 5},
 	{title: "Lang", width: 12, drop: 4},
 	{title: "Branch & Sync", width: 22, drop: 3},
@@ -42,8 +42,11 @@ func (m Model) repoRows(repos []gh.Repo) [][]string {
 		if desc == "" {
 			desc = "no description"
 		}
+		if r.IsArchived {
+			desc = "archived · " + desc
+		}
 		rows = append(rows, []string{
-			cell(m.repoIcon(r)+" "+p.bold(p.Blue, shortRepo(r.NameWithOwner, m.data.User.Login)), p.muted(desc)),
+			cell(m.repoIcon(r)+" "+m.repoRef(r.NameWithOwner), p.muted(desc)),
 			vis,
 			lang,
 			cell(p.text(p.ic.Branch+" "+r.SyncBranch), m.syncText(r)),
@@ -78,25 +81,30 @@ func (m Model) viewRepos(w, h int) string {
 					div++
 				}
 			}
-			chips := m.filterChips(
+			chips := m.chipsFit(
 				[]string{fmt.Sprintf("All (%d)", len(m.data.Repos)), fmt.Sprintf("Public (%d)", pub), fmt.Sprintf("Private (%d)", priv), fmt.Sprintf("Diverged (%d)", div)},
-				[]string{p.Blue, p.Green, p.Yellow, p.Purple}, m.pill[kindRepo])
+				[]string{"All", "Public", "Private", "Diverged"},
+				[]string{p.Blue, p.Green, p.Yellow, p.Purple}, m.pill[kindRepo], lw)
 			title := titled(p.ic.RepoPublic+" REPOSITORIES", p.ic.RepoPublic+" REPOSITORIES INVENTORY", chips, lw)
-			return m.listPane(kindRepo, title, chips, repoCols, m.repoRows(m.repos()), lw, h)
+			return m.listPane(kindRepo, title, chips, repoCols, m.repoRows(m.repos()), lw, h, "No repositories here · f cycles filters")
 		},
 		m.repoInspector)
 }
 
-// analyticsFor returns cached insight data for a repo; demo mode synthesizes it on the fly.
+// analyticsFor returns cached insight data for a repo. Only the demo dataset synthesizes analytics:
+// real repositories never show sample numbers.
 func (m Model) analyticsFor(r gh.Repo) (*gh.RepoAnalytics, string) {
-	if m.demo() {
+	if m.data.Demo {
 		return gh.MockAnalytics(r), ""
 	}
 	if a, ok := m.analytics[r.NameWithOwner]; ok {
 		return a, ""
 	}
 	if e, ok := m.analyticsErr[r.NameWithOwner]; ok {
-		return nil, "analytics unavailable: " + e
+		return nil, "analytics unavailable: " + firstLine(e) + " · press r to retry"
+	}
+	if m.client == nil {
+		return nil, "analytics need a live connection"
 	}
 	return nil, m.spin() + " loading analytics…"
 }
@@ -150,21 +158,33 @@ func (m Model) commitActivityBlock(a *gh.RepoAnalytics, w, h int) []string {
 	return m.weeklyChart(a.CommitWeeks, a.WeeksStart, w, h, p.Green)
 }
 
-// weeklyChart draws a weekly series as a column chart with a month axis, downsampling to fit w.
+// weeklyChart draws a weekly series as a column chart with a month axis, downsampling to fit w
+// and widening the columns to use the space when there is more of it.
 func (m Model) weeklyChart(series []int, start time.Time, w, h int, color string) []string {
 	p := m.p
 	weeks := series
 	axisW := chartAxisWidth(weeks) + 1
-	if avail := w - axisW; len(weeks) > avail && avail > 0 {
-		weeks = downsample(series, avail)
+	avail := w - axisW
+	if len(weeks) > avail && avail > 0 {
+		weeks = downsampleMax(series, avail)
 	}
-	gap := 0
-	if axisW+len(weeks)*2 <= w {
-		gap = 1
-	}
-	chart := p.columnChart(weeks, max(h-1, 1), 1, gap, color)
+	colw, gap := columnLayout(len(weeks), avail)
+	chart := p.columnChart(weeks, max(h-1, 1), colw, gap, color)
 	perCol := float64(len(series)) / float64(max(len(weeks), 1))
-	return append(chart, p.monthAxis(start, len(weeks), 1, gap, chartAxisWidth(weeks), perCol))
+	return append(chart, p.monthAxis(start, len(weeks), colw, gap, chartAxisWidth(weeks), perCol))
+}
+
+// columnLayout picks a column width and gap so n columns spread across avail cells.
+func columnLayout(n, avail int) (colw, gap int) {
+	per := avail / max(n, 1)
+	switch {
+	case per >= 3:
+		return min(per-1, 4), 1
+	case per == 2:
+		return 1, 1
+	default:
+		return 1, 0
+	}
 }
 
 // contributorsTable renders the top contributors with a share bar.
@@ -265,10 +285,11 @@ func (m Model) repoInspector(w, h int) string {
 
 	footer := append([]string{p.line(strings.Repeat("─", inner))}, m.buttons(inner,
 		[3]string{"⏎", p.ic.Pulse + " Full Insights", p.Green},
-		[3]string{"c", "gh repo clone " + shortRepo(r.NameWithOwner, ""), p.Blue},
+		[3]string{"c", "Copy Clone Cmd", p.Blue},
 		[3]string{"o", "Open", p.TextSecondary},
 	)...)
-	return p.panel(titled("REPOSITORY ANALYTICS", "REPOSITORY ANALYTICS & COMMIT ACTIVITY", "#", w), p.fg(p.Blue, shortRepo(r.NameWithOwner, m.data.User.Login)), b, footer, w, h, false)
+	right := p.fg(p.Blue, shortRepo(r.NameWithOwner, m.data.User.Login))
+	return p.panel(titled("REPOSITORY", "REPOSITORY ANALYTICS & COMMIT ACTIVITY", right, w), right, b, footer, w, h, false)
 }
 
 // syncTextPlain is syncText without color, for compact captions.

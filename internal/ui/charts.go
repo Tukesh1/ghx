@@ -65,9 +65,13 @@ func RenderLanguageBar(width int, langs []gh.LangStat) string {
 	return bar.String()
 }
 
-// heatmapPalette returns GitHub's green ramp; level 0 uses the theme surface so it reads on the inset.
+// heatmapPalette returns the theme's green ramp; an empty level 0 uses the theme surface so it reads on the inset.
 func (p palette) heatmapPalette() [5]string {
-	return [5]string{p.BgSurface, "#0e4429", "#006d32", "#26a641", "#39d353"}
+	pal := p.Heatmap
+	if pal[0] == "" {
+		pal[0] = p.BgSurface
+	}
+	return pal
 }
 
 // stackedBars renders a pass (green) / fail (red) stacked bar chart, height rows tall, colw cells
@@ -110,38 +114,6 @@ func (p palette) stackedBars(days []gh.CIDay, height, colw, gap int) []string {
 				c = p.fg(p.Green, lowerBlocks[g])
 			}
 			rows[r].WriteString(strings.Repeat(c, colw) + strings.Repeat(" ", gap))
-		}
-	}
-	out := make([]string, height)
-	for i := range rows {
-		out[i] = rows[i].String()
-	}
-	return out
-}
-
-// areaChart renders values as a filled bar chart height rows tall, one cell per value.
-func (p palette) areaChart(values []int, height int, color string) []string {
-	peak := 1
-	for _, v := range values {
-		peak = max(peak, v)
-	}
-	units := height * 8
-	rows := make([]strings.Builder, height)
-	for _, v := range values {
-		u := int(math.Round(float64(v) / float64(peak) * float64(units)))
-		if v > 0 && u == 0 {
-			u = 1
-		}
-		for r := 0; r < height; r++ {
-			f := clamp(u-(height-1-r)*8, 0, 8)
-			switch {
-			case f == 0 && r == height-1:
-				rows[r].WriteString(p.line("▁"))
-			case f == 0:
-				rows[r].WriteString(" ")
-			default:
-				rows[r].WriteString(p.fg(color, lowerBlocks[f]))
-			}
 		}
 	}
 	out := make([]string, height)
@@ -215,14 +187,15 @@ func shortLang(name string) string {
 	return name
 }
 
-// downsample sums values into n buckets so long series fit narrow panels.
-func downsample(values []int, n int) []int {
+// downsampleMax keeps the largest value of each bucket, so a narrowed chart's peak still matches
+// the per-week numbers quoted next to it.
+func downsampleMax(values []int, n int) []int {
 	if n <= 0 || len(values) <= n {
 		return values
 	}
 	out := make([]int, n)
 	for i, v := range values {
-		out[i*n/len(values)] += v
+		out[i*n/len(values)] = max(out[i*n/len(values)], v)
 	}
 	return out
 }
@@ -391,4 +364,11 @@ func (p palette) tileGrid(tiles []tile, w, perRow int) []string {
 		out = append(out, rows...)
 	}
 	return out
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }

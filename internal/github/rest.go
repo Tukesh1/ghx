@@ -2,11 +2,12 @@ package github
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
+	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -15,6 +16,10 @@ import (
 
 type restRun struct {
 	ID           int64     `json:"id"`
+	WorkflowID   int64     `json:"workflow_id"`
+	Path         string    `json:"path"`
+	HTMLURL      string    `json:"html_url"`
+	RunAttempt   int       `json:"run_attempt"`
 	Name         string    `json:"name"`
 	Event        string    `json:"event"`
 	HeadBranch   string    `json:"head_branch"`
@@ -43,6 +48,7 @@ type restJobs struct {
 }
 
 type restAlert struct {
+	HTMLURL    string `json:"html_url"`
 	Dependency struct {
 		Package struct {
 			Ecosystem string `json:"ecosystem"`
@@ -69,40 +75,11 @@ type restNotification struct {
 	Subject   struct {
 		Title string `json:"title"`
 		Type  string `json:"type"`
+		URL   string `json:"url"`
 	} `json:"subject"`
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
-}
-
-func (c *Client) get(ctx context.Context, path string, v any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, restURL+path, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusAccepted {
-		return ErrStatsPending
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: HTTP %d", path, resp.StatusCode)
-	}
-	if s, ok := v.(*string); ok {
-		b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		if err != nil {
-			return err
-		}
-		*s = string(b)
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(v)
 }
 
 // FetchRuns lists recent workflow runs for a repository.
@@ -120,16 +97,20 @@ func (c *Client) FetchRuns(ctx context.Context, repo string, perPage int) ([]Wor
 			end = time.Now()
 		}
 		runs = append(runs, WorkflowRun{
-			ID:         r.ID,
-			Name:       r.Name,
-			Repo:       repo,
-			Branch:     r.HeadBranch,
-			Event:      r.Event,
-			SHA:        shortSHA(r.HeadSHA),
-			Status:     r.Status,
-			Conclusion: r.Conclusion,
-			StartedAt:  r.RunStartedAt,
-			Duration:   end.Sub(r.RunStartedAt).Round(time.Second),
+			ID:           r.ID,
+			WorkflowID:   r.WorkflowID,
+			WorkflowPath: r.Path,
+			HTMLURL:      r.HTMLURL,
+			Attempt:      r.RunAttempt,
+			Name:         r.Name,
+			Repo:         repo,
+			Branch:       r.HeadBranch,
+			Event:        r.Event,
+			SHA:          shortSHA(r.HeadSHA),
+			Status:       r.Status,
+			Conclusion:   r.Conclusion,
+			StartedAt:    r.RunStartedAt,
+			Duration:     max(end.Sub(r.RunStartedAt).Round(time.Second), 0),
 		})
 	}
 	return runs, nil
@@ -165,24 +146,43 @@ func (c *Client) FetchJobLogTail(ctx context.Context, repo string, jobID int64, 
 	return FailureExcerpt(raw, n), nil
 }
 
-// FailureExcerpt strips log timestamps and returns n lines ending at the first error marker.
+var (
+	logTimestamp = regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z `)
+	logANSI      = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+)
+
+// FailureExcerpt cleans a raw Actions log and returns up to n lines ending at the first error,
+// starting no earlier than the step that failed. Timestamps, ANSI color codes, ##[group] markers and
+// the "with:"/"env:" blocks the runner echoes for every step are dropped so the excerpt shows what
+// actually went wrong.
 func FailureExcerpt(raw string, n int) []string {
 	var lines []string
+	var stepStarts []int // index of each step's "Run …" header line
+	inEcho := false
 	for _, l := range strings.Split(strings.ReplaceAll(raw, "\r", ""), "\n") {
-		if len(l) > 29 && l[4] == '-' && l[10] == 'T' {
-			if sp := strings.IndexByte(l, ' '); sp > 0 && sp < 35 {
-				l = l[sp+1:]
-			}
-		}
-		if strings.TrimSpace(l) == "" || strings.HasPrefix(l, "##[group]") || strings.HasPrefix(l, "##[endgroup]") {
+		l = logANSI.ReplaceAllString(logTimestamp.ReplaceAllString(l, ""), "")
+		trimmed := strings.TrimSpace(l)
+		switch {
+		case strings.HasPrefix(l, "##[group]Run "):
+			stepStarts = append(stepStarts, len(lines))
+			lines = append(lines, "▶ "+strings.TrimPrefix(l, "##[group]"))
+			inEcho = false
+			continue
+		case trimmed == "", strings.HasPrefix(l, "##[group]"), strings.HasPrefix(l, "##[endgroup]"):
+			continue
+		case trimmed == "with:" || trimmed == "env:":
+			inEcho = true
+			continue
+		case inEcho && strings.HasPrefix(l, "  "):
 			continue
 		}
+		inEcho = false
 		lines = append(lines, l)
 	}
 	// Prefer GitHub's explicit ##[error] annotation; fall back to common failure markers.
 	end := len(lines)
 	found := false
-	for _, markers := range [][]string{{"##[error]"}, {"panic:", "--- fail", "error:"}} {
+	for _, markers := range [][]string{{"##[error]"}, {"panic:", "--- fail", "error:", "error[", "failed"}} {
 		for i, l := range lines {
 			low := strings.ToLower(l)
 			for _, mk := range markers {
@@ -199,9 +199,11 @@ func FailureExcerpt(raw string, n int) []string {
 			break
 		}
 	}
-	start := end - n
-	if start < 0 {
-		start = 0
+	start := max(end-n, 0)
+	for _, s := range stepStarts {
+		if s < end && s > start {
+			start = s
+		}
 	}
 	out := make([]string, 0, end-start)
 	for _, l := range lines[start:end] {
@@ -233,6 +235,7 @@ func (c *Client) FetchDependabot(ctx context.Context, repo string) ([]Dependabot
 			Severity:       a.SecurityAdvisory.Severity,
 			CurrentVersion: a.SecurityVulnerability.VulnerableVersionRange,
 			PatchedVersion: a.SecurityVulnerability.FirstPatchedVersion.Identifier,
+			URL:            a.HTMLURL,
 		})
 	}
 	return alerts, nil
@@ -241,14 +244,39 @@ func (c *Client) FetchDependabot(ctx context.Context, repo string) ([]Dependabot
 // FetchNotifications lists unread notifications.
 func (c *Client) FetchNotifications(ctx context.Context) ([]Notification, error) {
 	var out []restNotification
-	if err := c.get(ctx, "/notifications?all=false&per_page=15", &out); err != nil {
+	if err := c.get(ctx, "/notifications?all=false&per_page=30", &out); err != nil {
 		return nil, err
 	}
 	ns := make([]Notification, 0, len(out))
 	for _, n := range out {
-		ns = append(ns, Notification{ID: n.ID, Reason: n.Reason, Title: n.Subject.Title, Type: n.Subject.Type, Repo: n.Repository.FullName, UpdatedAt: n.UpdatedAt})
+		ns = append(ns, Notification{
+			ID: n.ID, Reason: n.Reason, Title: n.Subject.Title, Type: n.Subject.Type, Repo: n.Repository.FullName,
+			URL: NotificationURL(n.Subject.URL, n.Subject.Type, n.Repository.FullName), UpdatedAt: n.UpdatedAt,
+		})
 	}
 	return ns, nil
+}
+
+var apiSubject = regexp.MustCompile(`^https://api\.github\.com/repos/([^/]+/[^/]+)/(pulls|issues|commits|discussions)/([^/?#]+)$`)
+
+// NotificationURL turns a notification subject's API URL into the github.com page a person opens.
+func NotificationURL(apiURL, typ, repo string) string {
+	if m := apiSubject.FindStringSubmatch(apiURL); m != nil {
+		kind := map[string]string{"pulls": "pull", "issues": "issues", "commits": "commit", "discussions": "discussions"}[m[2]]
+		return fmt.Sprintf("%s/%s/%s/%s", WebURL, m[1], kind, m[3])
+	}
+	base := WebURL + "/" + repo
+	switch typ {
+	case "Release":
+		return base + "/releases"
+	case "CheckSuite", "WorkflowRun":
+		return base + "/actions"
+	case "Discussion":
+		return base + "/discussions"
+	case "RepositoryVulnerabilityAlert", "RepositoryDependabotAlertsThread":
+		return base + "/security/dependabot"
+	}
+	return base
 }
 
 // FetchCompare returns how far head is ahead/behind base.
@@ -257,13 +285,15 @@ func (c *Client) FetchCompare(ctx context.Context, repo, base, head string) (ahe
 		AheadBy  int `json:"ahead_by"`
 		BehindBy int `json:"behind_by"`
 	}
-	if err := c.get(ctx, fmt.Sprintf("/repos/%s/compare/%s...%s", repo, base, head), &out); err != nil {
+	path := fmt.Sprintf("/repos/%s/compare/%s...%s?per_page=1", repo, url.PathEscape(base), url.PathEscape(head))
+	if err := c.get(ctx, path, &out); err != nil {
 		return 0, 0, err
 	}
 	return out.AheadBy, out.BehindBy, nil
 }
 
-// Fetch loads the full live dashboard: one GraphQL batch plus concurrent REST enrichment.
+// Fetch loads the full live dashboard: concurrent GraphQL sections, then concurrent REST enrichment
+// (workflow runs, Dependabot alerts, notifications, branch sync) and finally job details and failure logs.
 func (c *Client) Fetch(ctx context.Context, org string) (*Dashboard, error) {
 	d, err := c.FetchGraphQL(ctx, org)
 	if err != nil {
@@ -275,31 +305,46 @@ func (c *Client) Fetch(ctx context.Context, org string) (*Dashboard, error) {
 		wg      sync.WaitGroup
 		allRuns []WorkflowRun
 	)
-	ciRepos := d.Repos
-	if len(ciRepos) > 5 {
-		ciRepos = ciRepos[:5]
+	warn := func(section string, err error) {
+		if err == nil || IsNotFound(err) || ctx.Err() != nil {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		msg := section + ": " + err.Error()
+		for _, w := range d.Warnings {
+			if w == msg {
+				return
+			}
+		}
+		d.Warnings = append(d.Warnings, msg)
 	}
-	for _, r := range ciRepos {
+	var active []string
+	for _, r := range d.Repos {
+		if !r.IsArchived {
+			active = append(active, r.NameWithOwner)
+		}
+	}
+	for i, repo := range active {
+		if i >= 6 {
+			break
+		}
 		wg.Add(1)
 		go func(repo string) {
 			defer wg.Done()
 			runs, err := c.FetchRuns(ctx, repo, 20)
-			if err != nil {
-				return
-			}
+			warn("workflow runs", err)
 			mu.Lock()
 			allRuns = append(allRuns, runs...)
 			mu.Unlock()
-		}(r.NameWithOwner)
-	}
-	alertRepos := d.Repos
-	if len(alertRepos) > 4 {
-		alertRepos = alertRepos[:4]
-	}
-	for _, r := range alertRepos {
+		}(repo)
+		if i >= 4 {
+			continue
+		}
 		wg.Add(1)
 		go func(repo string) {
 			defer wg.Done()
+			// Dependabot alerts need admin or security-manager access; 403/404 just means "not yours".
 			alerts, err := c.FetchDependabot(ctx, repo)
 			if err != nil {
 				return
@@ -307,20 +352,20 @@ func (c *Client) Fetch(ctx context.Context, org string) (*Dashboard, error) {
 			mu.Lock()
 			d.Alerts = append(d.Alerts, alerts...)
 			mu.Unlock()
-		}(r.NameWithOwner)
+		}(repo)
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if ns, err := c.FetchNotifications(ctx); err == nil {
-			mu.Lock()
-			d.Notifications = ns
-			mu.Unlock()
-		}
+		ns, err := c.FetchNotifications(ctx)
+		warn("notifications", err)
+		mu.Lock()
+		d.Notifications = ns
+		mu.Unlock()
 	}()
 	branchFor := map[string]string{}
 	for _, p := range d.MyPRs {
-		if _, ok := branchFor[p.Repo]; !ok {
+		if _, ok := branchFor[p.Repo]; !ok && !p.CrossRepo {
 			branchFor[p.Repo] = p.HeadRef
 		}
 	}
@@ -343,10 +388,11 @@ func (c *Client) Fetch(ctx context.Context, org string) (*Dashboard, error) {
 	}
 	wg.Wait()
 
+	sort.Slice(d.Alerts, func(i, j int) bool { return severityRank(d.Alerts[i].Severity) < severityRank(d.Alerts[j].Severity) })
 	d.CIHistory = BuildCIHistory(allRuns, time.Now())
 	sort.Slice(allRuns, func(i, j int) bool { return allRuns[i].StartedAt.After(allRuns[j].StartedAt) })
-	if len(allRuns) > 12 {
-		allRuns = allRuns[:12]
+	if len(allRuns) > 15 {
+		allRuns = allRuns[:15]
 	}
 	d.Runs = allRuns
 
@@ -370,7 +416,7 @@ func (c *Client) Fetch(ctx context.Context, org string) (*Dashboard, error) {
 			}
 			for _, j := range jobs {
 				if j.Conclusion == "failure" {
-					if lines, err := c.FetchJobLogTail(ctx, r.Repo, j.ID, 12); err == nil {
+					if lines, err := c.FetchJobLogTail(ctx, r.Repo, j.ID, 14); err == nil {
 						r.FailureLog = lines
 					}
 					return
@@ -379,64 +425,108 @@ func (c *Client) Fetch(ctx context.Context, org string) (*Dashboard, error) {
 		}(&d.Runs[i], wantLog)
 	}
 	wg.Wait()
+	sort.Strings(d.Warnings)
 	return d, nil
 }
 
-// ActionResult reports the outcome of a gh CLI mutation.
-type ActionResult struct {
-	Command string
-	Output  string
-	Err     error
-}
-
-// RunGH executes a gh subcommand and captures its combined output.
-func RunGH(args ...string) ActionResult {
-	if _, err := exec.LookPath("gh"); err != nil {
-		return ActionResult{Command: "gh " + strings.Join(args, " "), Err: fmt.Errorf("GitHub CLI (gh) not found — install it from https://cli.github.com and run `gh auth login`")}
+func severityRank(s string) int {
+	switch strings.ToLower(s) {
+	case "critical":
+		return 0
+	case "high":
+		return 1
+	case "medium", "moderate":
+		return 2
+	default:
+		return 3
 	}
-	cmd := exec.Command("gh", args...)
-	out, err := cmd.CombinedOutput()
-	return ActionResult{Command: "gh " + strings.Join(args, " "), Output: strings.TrimSpace(string(out)), Err: err}
 }
 
-// ApproveArgs builds `gh pr review --approve` arguments.
-func ApproveArgs(repo string, number int) []string {
-	return []string{"pr", "review", fmt.Sprint(number), "--repo", repo, "--approve"}
+// ---- Mutations ------------------------------------------------------------------------------
+// Mutations call the REST API directly with the same token, so they work without the gh CLI.
+
+// Approve submits an approving review.
+func (c *Client) Approve(ctx context.Context, repo string, number int) error {
+	return c.rest(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/pulls/%d/reviews", repo, number), map[string]string{"event": "APPROVE"}, nil)
 }
 
-// MergeArgs builds `gh pr merge --squash` arguments.
-func MergeArgs(repo string, number int) []string {
-	return []string{"pr", "merge", fmt.Sprint(number), "--repo", repo, "--squash", "--delete-branch"}
+// Merge merges a PR with its repository's preferred method and, when deleteBranch is set and the
+// head branch lives in the same repository, deletes the branch afterwards.
+func (c *Client) Merge(ctx context.Context, pr PullRequest, deleteBranch bool) error {
+	method := pr.MergeMethod
+	if method == "" {
+		method = MergeSquash
+	}
+	body := map[string]string{"merge_method": method}
+	if method == MergeSquash {
+		body["commit_title"] = fmt.Sprintf("%s (#%d)", pr.Title, pr.Number)
+	}
+	if err := c.rest(ctx, http.MethodPut, fmt.Sprintf("/repos/%s/pulls/%d/merge", pr.Repo, pr.Number), body, nil); err != nil {
+		return err
+	}
+	if deleteBranch && !pr.CrossRepo && pr.HeadRef != "" {
+		// 422 means the branch is already gone (e.g. "automatically delete head branches" is on).
+		_ = c.rest(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/git/refs/heads/%s", pr.Repo, url.PathEscape(pr.HeadRef)), nil, nil)
+	}
+	return nil
 }
 
-// CheckoutArgs builds `gh pr checkout` arguments.
-func CheckoutArgs(repo string, number int) []string {
-	return []string{"pr", "checkout", fmt.Sprint(number), "--repo", repo}
+// CloseIssue closes an issue as completed.
+func (c *Client) CloseIssue(ctx context.Context, repo string, number int) error {
+	return c.rest(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/issues/%d", repo, number), map[string]string{"state": "closed", "state_reason": "completed"}, nil)
 }
 
-// RerunArgs builds `gh run rerun --failed` arguments.
-func RerunArgs(repo string, runID int64) []string {
-	return []string{"run", "rerun", fmt.Sprint(runID), "--repo", repo, "--failed"}
+// Comment posts a comment on an issue or pull request.
+func (c *Client) Comment(ctx context.Context, repo string, number int, body string) error {
+	return c.rest(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number), map[string]string{"body": body}, nil)
 }
 
-// WorkflowDispatchArgs builds `gh workflow run` arguments for a workflow_dispatch trigger.
-func WorkflowDispatchArgs(repo, workflow string) []string {
-	return []string{"workflow", "run", workflow, "--repo", repo}
+// RerunFailedJobs re-runs only the failed jobs of a workflow run.
+func (c *Client) RerunFailedJobs(ctx context.Context, repo string, runID int64) error {
+	return c.rest(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/actions/runs/%d/rerun-failed-jobs", repo, runID), nil, nil)
 }
 
-// CloseIssueArgs builds `gh issue close` arguments.
-func CloseIssueArgs(repo string, number int) []string {
-	return []string{"issue", "close", fmt.Sprint(number), "--repo", repo}
+// DispatchWorkflow triggers a workflow_dispatch event for a workflow on ref.
+func (c *Client) DispatchWorkflow(ctx context.Context, repo string, workflowID int64, ref string) error {
+	return c.rest(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/actions/workflows/%d/dispatches", repo, workflowID), map[string]string{"ref": ref}, nil)
 }
 
-// CommentIssueArgs opens the issue comment composer in the browser.
-func CommentIssueArgs(repo string, number int) []string {
-	return []string{"issue", "comment", fmt.Sprint(number), "--repo", repo, "--web"}
+// MarkThreadRead marks one notification thread as read.
+func (c *Client) MarkThreadRead(ctx context.Context, id string) error {
+	return c.rest(ctx, http.MethodPatch, "/notifications/threads/"+url.PathEscape(id), nil, nil)
 }
 
-// MarkNotificationsReadArgs marks every notification as read via the REST API.
-func MarkNotificationsReadArgs() []string {
-	return []string{"api", "--method", "PUT", "/notifications", "-F", "read=true"}
+// MarkAllRead marks every notification as read.
+func (c *Client) MarkAllRead(ctx context.Context) error {
+	return c.rest(ctx, http.MethodPut, "/notifications", map[string]bool{"read": true}, nil)
+}
+
+// ---- Local helpers --------------------------------------------------------------------------
+
+var remoteRepo = regexp.MustCompile(`github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?(?:\s|$)`)
+
+// LocalRepos lists the GitHub repositories (owner/name) the git checkout in dir points at.
+func LocalRepos(dir string) []string {
+	cmd := exec.Command("git", "remote", "-v")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var repos []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if m := remoteRepo.FindStringSubmatch(line); m != nil && !seen[strings.ToLower(m[1])] {
+			seen[strings.ToLower(m[1])] = true
+			repos = append(repos, m[1])
+		}
+	}
+	return repos
+}
+
+// CheckoutCommand is the gh command that checks a PR out locally.
+func CheckoutCommand(repo string, number int) []string {
+	return []string{"gh", "pr", "checkout", fmt.Sprint(number), "--repo", repo}
 }
 
 // CloneCommand returns the shell command to clone a repository.
@@ -444,19 +534,41 @@ func CloneCommand(repo string) string {
 	return "gh repo clone " + repo
 }
 
-// OpenURL opens a URL in the default browser.
-func OpenURL(url string) error {
-	for _, opener := range []string{"open", "xdg-open", "wslview"} {
-		if _, err := exec.LookPath(opener); err == nil {
-			return exec.Command(opener, url).Start()
-		}
-	}
-	return fmt.Errorf("no browser opener found")
+// HasGH reports whether the GitHub CLI is installed.
+func HasGH() bool {
+	_, err := exec.LookPath("gh")
+	return err == nil
 }
 
-// CopyToClipboard copies text using pbcopy, wl-copy, xclip or clip.exe, whichever exists.
+// OpenURL opens a URL in the default browser.
+func OpenURL(u string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", u)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u)
+	default:
+		for _, opener := range []string{"xdg-open", "wslview", "sensible-browser"} {
+			if _, err := exec.LookPath(opener); err == nil {
+				cmd = exec.Command(opener, u)
+				break
+			}
+		}
+	}
+	if cmd == nil {
+		return fmt.Errorf("no browser opener found · %s", u)
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
+// CopyToClipboard copies text using pbcopy, wl-copy, xclip, xsel or clip.exe, whichever exists.
 func CopyToClipboard(text string) error {
-	candidates := [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"clip.exe"}}
+	candidates := [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "--clipboard", "--input"}, {"clip.exe"}}
 	for _, c := range candidates {
 		if _, err := exec.LookPath(c[0]); err != nil {
 			continue

@@ -1,31 +1,78 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 )
 
-// commandEcho is the default status line: a gh-style summary of what needs attention.
+// commandEcho is the default status line: a one-line summary of what needs attention.
 func (m Model) commandEcho() string {
-	org := "all"
-	if m.cfg.Org != "" {
-		org = m.cfg.Org
-	}
 	failing, _ := m.data.RunCounts()
-	return fmt.Sprintf("gh status --org=%s // %d PRs awaiting your review · %d CI run(s) failing", org, len(m.data.ReviewPRs), failing)
+	parts := []string{}
+	if n := len(m.data.ReviewPRs); n > 0 {
+		parts = append(parts, plural(n, "review")+" waiting")
+	}
+	if n := m.data.MergeReadyCount(); n > 0 {
+		parts = append(parts, plural(n, "PR")+" ready to merge")
+	}
+	if failing > 0 {
+		parts = append(parts, plural(failing, "run")+" failing")
+	}
+	if n := m.data.BlockerCount(); n > 0 {
+		parts = append(parts, plural(n, "P0 issue")+" open")
+	}
+	if len(parts) == 0 {
+		return "all clear · nothing needs your attention"
+	}
+	return strings.Join(parts, " · ")
 }
 
-// footer renders the bottom status line: mode pill, command echo with blinking cursor, and key caps.
+// footerHints are the key caps shown for the current context, most important first.
+func (m Model) footerHints() [][2]string {
+	common := [][2]string{{"/", "Filter"}, {"n", "Inbox"}, {"R", "Refresh"}, {"t", "Theme"}, {"q", "Quit"}}
+	var ctx [][2]string
+	switch {
+	case m.composeTo != nil:
+		return [][2]string{{"ctrl+s", "Post"}, {"esc", "Cancel"}}
+	case m.showNotifs:
+		return [][2]string{{"⏎", "Open"}, {"m", "Mark all read"}, {"y", "Copy link"}, {"n", "Close"}}
+	case m.searching:
+		return [][2]string{{"⏎", "Apply"}, {"esc", "Clear"}}
+	case m.tab == tabRepos && m.insights:
+		ctx = [][2]string{{"j/k", "Repo"}, {"esc", "Back"}, {"o", "Open"}, {"r", "Reload"}}
+	case m.activeKind() == kindPR:
+		ctx = [][2]string{{"a", "Approve"}, {"m m", "Merge"}, {"c", "Checkout"}, {"C", "Comment"}, {"o", "Open"}}
+	case m.activeKind() == kindRun:
+		ctx = [][2]string{{"r", "Re-run"}, {"w w", "Dispatch"}, {"o", "Open"}, {"y", "Copy link"}}
+	case m.activeKind() == kindRepo:
+		ctx = [][2]string{{"⏎", "Insights"}, {"c", "Clone"}, {"o", "Open"}}
+	case m.activeKind() == kindIssue:
+		ctx = [][2]string{{"c", "Comment"}, {"x x", "Close"}, {"o", "Open"}}
+	case m.activeKind() == kindPinned:
+		ctx = [][2]string{{"⏎", "Open repo"}, {"O", "Open profile"}, {"c", "Clone"}, {"y", "Copy link"}}
+	}
+	if m.tab == tabOverview && !m.showNotifs {
+		ctx = append([][2]string{{"tab", "Panel"}, {"⏎", "Expand"}}, ctx...)
+	}
+	return append(append([][2]string{{"?", "Keys"}}, ctx...), common...)
+}
+
+// footer renders the bottom status line: mode pill, status message, and context key caps.
 func (m Model) footer(w int) string {
 	p := m.p
-	mode, modeColor := "INTERACTIVE", p.Blue
+	mode, modeColor := "NORMAL", p.Blue
 	switch {
+	case m.composeTo != nil:
+		mode, modeColor = "COMMENT", p.Purple
 	case m.searching:
 		mode, modeColor = "FILTER", p.Yellow
 	case m.pending != "":
 		mode, modeColor = "CONFIRM", p.Red
+	case m.busy > 0:
+		mode, modeColor = m.spin()+" WORKING", p.Yellow
 	case m.loading:
-		mode, modeColor = "SYNCING", p.Yellow
+		mode, modeColor = m.spin()+" SYNCING", p.Yellow
+	case m.data.Demo:
+		mode, modeColor = "DEMO", p.Yellow
 	}
 
 	msg, color := m.status, p.Cyan
@@ -37,19 +84,15 @@ func (m Model) footer(w int) string {
 	}
 	if msg == "" {
 		msg = m.commandEcho()
+		color = p.TextSecondary
 	}
-	cursor := " "
-	if m.frame%2 == 0 || m.loading {
-		cursor = p.fg(p.Green, "█")
-	}
-	left := " " + p.pill(modeColor, mode) + " " + p.fg(color, msg) + " " + cursor
+	left := " " + p.pill(modeColor, mode) + " " + p.fg(color, msg)
 
-	hints := [][2]string{{"1-5", "Views"}, {"/", "Filter"}, {"j/k", "Row Nav"}, {"t", "Theme"}, {"i", "Glyphs"}, {"n", "Inbox"}, {"r", "Fetch"}, {"?", "Keys"}}
-
-	budget := w - width(left) - 3
+	// Hints get at least ~40% of the line; the message is truncated before hints are dropped.
 	var parts []string
 	used := 0
-	for _, h := range hints {
+	budget := max(w-width(left)-3, w*2/5)
+	for _, h := range m.footerHints() {
 		s := p.kbd(h[0]) + " " + p.muted(h[1])
 		if used+width(s)+2 > budget {
 			break

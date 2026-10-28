@@ -11,7 +11,7 @@ import (
 var runCols = []column{
 	{title: "Run ID", width: 12, drop: 4},
 	{title: "Workflow", width: -2, min: 14},
-	{title: "Repository", width: -2, drop: 3},
+	{title: "Repository", width: -2, drop: 3, mid: true},
 	{title: "Trigger", width: 14, drop: 5},
 	{title: "Branch / SHA", width: -2, drop: 2},
 	{title: "Status", width: 8},
@@ -26,7 +26,7 @@ func (m Model) runRows(runs []gh.WorkflowRun) [][]string {
 		rows = append(rows, []string{
 			p.bold(p.Cyan, fmt.Sprintf("#%d", r.ID)),
 			p.bold(p.TextPrimary, r.Name),
-			p.fg(p.Blue, shortRepo(r.Repo, m.data.User.Login)),
+			m.repoRef(r.Repo),
 			p.badge(p.TextSecondary, r.Event),
 			cell(p.muted(r.Branch), p.dim(p.ic.Commit+" "+r.SHA)),
 			p.runStateBadge(r),
@@ -42,11 +42,19 @@ func (m Model) viewActions(w, h int) string {
 	p := m.p
 	return m.splitTab(w, h,
 		func(lw, h int) string {
-			chips := m.filterChips([]string{"All", "Failing", "Running", "Passed"}, []string{p.Blue, p.Red, p.Yellow, p.Green}, m.pill[kindRun])
+			chips := m.chipsFit([]string{"All", "Failing", "Running", "Passed"}, []string{"All", "Fail", "Run", "Pass"}, []string{p.Blue, p.Red, p.Yellow, p.Green}, m.pill[kindRun], lw)
 			title := titled(p.ic.Play+" WORKFLOW RUNS", p.ic.Play+" GITHUB ACTIONS WORKFLOW RUNS", chips, lw)
-			return m.listPane(kindRun, title, chips, runCols, m.runRows(m.runs()), lw, h)
+			return m.listPane(kindRun, title, chips, runCols, m.runRows(m.runs()), lw, h, "No workflow runs here · f cycles filters")
 		},
 		m.runInspector)
+}
+
+// attemptLabel notes re-run attempts, e.g. " · attempt 2".
+func attemptLabel(p palette, r gh.WorkflowRun) string {
+	if r.Attempt > 1 {
+		return p.muted(fmt.Sprintf(" · attempt %d", r.Attempt))
+	}
+	return ""
 }
 
 func jobState(status, conclusion string) string {
@@ -72,6 +80,8 @@ func (m Model) colorLog(l string) string {
 	p := m.p
 	low := strings.ToLower(l)
 	switch {
+	case strings.HasPrefix(l, "▶ "):
+		return p.bold(p.Cyan, l)
 	case strings.Contains(low, "panic") || strings.Contains(l, "FAIL") || strings.Contains(low, "error") || strings.Contains(low, "exit code 1"):
 		return p.bold(p.Red, l)
 	case strings.Contains(l, "✓") || strings.Contains(l, "PASS") || strings.HasPrefix(low, "ok "):
@@ -88,7 +98,7 @@ func (m Model) colorLog(l string) string {
 func (m Model) runInspector(w, h int) string {
 	p := m.p
 	inner := w - 4
-	title := titled("JOB MATRIX & STEP LOGS", "JOB MATRIX & ANSI STEP LOGS", "Run #0000000000", w)
+	title := titled("WORKFLOW RUN", "WORKFLOW RUN · JOBS, STEPS & LOGS", "Run #0000000000", w)
 	r, ok := m.selectedRun()
 	if !ok {
 		return p.panel(title, "", []string{p.muted("no workflow run selected")}, nil, w, h, false)
@@ -96,7 +106,7 @@ func (m Model) runInspector(w, h int) string {
 	b := []string{
 		p.bold(p.TextPrimary, r.Name) + p.dim(" · ") + p.fg(p.Blue, r.Repo) + "  " + p.runStateBadge(r),
 		p.muted("Branch: ") + p.text(r.Branch) + p.muted(" · SHA: ") + p.fg(p.Yellow, r.SHA),
-		p.muted("Trigger: ") + p.text(r.Event) + p.muted(" · Duration: ") + p.text(dur(runDuration(r))) + p.muted(" · started "+ago(r.StartedAt)+" ago"),
+		p.muted("Trigger: ") + p.text(r.Event) + p.muted(" · Duration: ") + p.text(dur(runDuration(r))) + p.muted(" · started "+ago(r.StartedAt)+" ago") + attemptLabel(p, r),
 		"",
 	}
 
@@ -128,10 +138,10 @@ func (m Model) runInspector(w, h int) string {
 	if len(matrix) == 0 {
 		matrix = []string{p.muted("job details unavailable")}
 	}
-	b = append(b, p.box(fmt.Sprintf("Job Matrix (%d jobs)", len(r.Jobs)), matrix, inner)...)
+	b = append(b, p.box("Job Matrix · "+plural(len(r.Jobs), "job"), matrix, inner)...)
 
 	logLines := r.FailureLog
-	logTitle := "Log"
+	logTitle := "Failure log"
 	if logStep != nil {
 		logLines = logStep.Log
 		logTitle = "Log · " + logStep.Name
@@ -145,14 +155,15 @@ func (m Model) runInspector(w, h int) string {
 		b = append(b, p.box(logTitle, ll, inner)...)
 	}
 
-	rerun := [3]string{"r", p.ic.Running + " Re-run Workflow", p.Green}
+	var actions [][3]string
 	if r.State() == gh.StateFailure {
-		rerun[1] = p.ic.Running + " Re-run Failed Jobs"
+		actions = append(actions, [3]string{"r", p.ic.Running + " Re-run Failed Jobs", p.Green})
 	}
-	footer := append([]string{p.line(strings.Repeat("─", inner))}, m.buttons(inner,
-		rerun,
-		[3]string{"w w", p.ic.Play + " Run workflow_dispatch", p.Blue},
+	actions = append(actions,
+		[3]string{"w w", p.ic.Play + " Run Workflow", p.Blue},
 		[3]string{"o", "Open", p.TextSecondary},
-	)...)
+		[3]string{"y", "Copy Link", p.TextSecondary},
+	)
+	footer := append([]string{p.line(strings.Repeat("─", inner))}, m.buttons(inner, actions...)...)
 	return p.panel(title, p.badge(p.Cyan, fmt.Sprintf("Run #%d", r.ID)), b, footer, w, h, false)
 }

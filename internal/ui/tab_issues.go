@@ -9,13 +9,12 @@ import (
 
 var issueCols = []column{
 	{title: "ID", width: 8},
-	{title: "Repository", width: -1, drop: 4},
+	{title: "Repository", width: -1, drop: 4, mid: true},
 	{title: "Title", width: -3, min: 26},
-	{title: "State", width: 6, drop: 6},
 	{title: "Priority", width: 12},
 	{title: "Labels", width: 18, drop: 3},
 	{title: "Linked PR", width: 9, drop: 2},
-	{title: "Assignee", width: 10, drop: 7},
+	{title: "Opened By", width: 12, drop: 6},
 	{title: "Comments", width: 8, right: true, drop: 5},
 	{title: "Age", width: 5, right: true, drop: 1},
 }
@@ -34,15 +33,18 @@ func (m Model) issueRows(issues []gh.Issue) [][]string {
 				labels = append(labels, p.badge(p.TextSecondary, l.Name))
 			}
 		}
+		author := p.dim("—")
+		if is.Author != "" {
+			author = p.fg(p.Cyan, "@"+is.Author)
+		}
 		rows = append(rows, []string{
 			p.fg(p.Green, p.ic.IssueOpen) + " " + p.bold(p.TextPrimary, fmt.Sprintf("#%d", is.Number)),
-			p.fg(p.Blue, shortRepo(is.Repo, m.data.User.Login)),
+			m.repoRef(is.Repo),
 			p.text(is.Title),
-			p.badge(p.Green, "OPEN"),
 			p.priorityBadge(is.Priority),
 			strings.Join(labels, " "),
 			linked,
-			p.fg(p.Cyan, m.data.User.Login),
+			author,
 			p.muted(fmt.Sprintf("%s %d", p.ic.Comment, is.Comments)),
 			p.muted(ago(is.CreatedAt)),
 		})
@@ -59,11 +61,12 @@ func (m Model) viewIssues(w, h int) string {
 			for _, is := range m.data.Issues {
 				count[is.Priority]++
 			}
-			chips := m.filterChips(
+			chips := m.chipsFit(
 				[]string{fmt.Sprintf("All (%d)", len(m.data.Issues)), fmt.Sprintf("P0 (%d)", count["P0"]), fmt.Sprintf("P1 (%d)", count["P1"]), fmt.Sprintf("P2+ (%d)", count["P2"]+count["P3"])},
-				[]string{p.Blue, p.Red, p.Yellow, p.TextSecondary}, m.pill[kindIssue])
+				[]string{"All", "P0", "P1", "P2+"},
+				[]string{p.Blue, p.Red, p.Yellow, p.TextSecondary}, m.pill[kindIssue], lw)
 			title := titled(p.ic.IssueOpen+" ISSUES & BUG TRIAGE", p.ic.IssueOpen+" ISSUES, BUG REPORTS & FEATURE REQUESTS", chips, lw)
-			return m.listPane(kindIssue, title, chips, issueCols, m.issueRows(m.issues()), lw, h)
+			return m.listPane(kindIssue, title, chips, issueCols, m.issueRows(m.issues()), lw, h, "No open issues are assigned to you")
 		},
 		m.issueInspector)
 }
@@ -80,7 +83,7 @@ func (m Model) findPR(repo string, number int) (gh.PullRequest, bool) {
 func (m Model) issueInspector(w, h int) string {
 	p := m.p
 	inner := w - 4
-	title := titled("ISSUE DISCUSSION", "ISSUE DISCUSSION & MILESTONE TRACKER", "v0.00 (00%)", w)
+	title := titled("ISSUE", "ISSUE · DESCRIPTION & MILESTONE", "v0.00 (00%)", w)
 	is, ok := m.selectedIssue()
 	if !ok {
 		return p.panel(title, "", []string{p.muted("no issue selected")}, nil, w, h, false)
@@ -95,7 +98,11 @@ func (m Model) issueInspector(w, h int) string {
 			labels += " " + p.badge(p.TextSecondary, l.Name)
 		}
 	}
-	b = append(b, labels+"  "+p.muted(fmt.Sprintf("%s %d comments · opened %s ago", p.ic.Comment, is.Comments, ago(is.CreatedAt))), "")
+	opened := "opened " + ago(is.CreatedAt) + " ago"
+	if is.Author != "" {
+		opened += " by @" + is.Author
+	}
+	b = append(b, labels+"  "+p.muted(p.ic.Comment+" "+plural(is.Comments, "comment")+" · "+opened), "")
 
 	body := strings.TrimSpace(is.Body)
 	if body == "" {
@@ -133,6 +140,7 @@ func (m Model) issueInspector(w, h int) string {
 		[3]string{"x x", p.ic.IssueClosed + " Close Issue", p.Purple},
 		[3]string{"c", p.ic.Comment + " Comment", p.Blue},
 		[3]string{"o", "Open", p.TextSecondary},
+		[3]string{"y", "Copy Link", p.TextSecondary},
 	)...)
 	return p.panel(title, right, b, footer, w, h, false)
 }

@@ -80,7 +80,7 @@ func TestMockAnalyticsIsDeterministic(t *testing.T) {
 	if !reflect.DeepEqual(a.CommitWeeks, b.CommitWeeks) || len(a.CommitWeeks) != 52 {
 		t.Errorf("commit weeks not deterministic or wrong length (%d)", len(a.CommitWeeks))
 	}
-	if len(a.Contributors) == 0 || len(a.CodeFreq) != 26 || len(a.Views) != 14 {
+	if len(a.Contributors) == 0 || len(a.CodeFreq) != 52 || len(a.Views) != 14 {
 		t.Errorf("incomplete mock analytics: %d contributors, %d code freq, %d views", len(a.Contributors), len(a.CodeFreq), len(a.Views))
 	}
 }

@@ -26,7 +26,7 @@ func TestEveryFrameFitsTheTerminal(t *testing.T) {
 			}
 			for name, frame := range frames {
 				var w, h int
-				fmt.Sscanf(name, "%dx%d", &w, &h)
+				_, _ = fmt.Sscanf(name, "%dx%d", &w, &h)
 				lines := strings.Split(frame, "\n")
 				if len(lines) != h {
 					t.Errorf("%s/%s: %d lines, want %d", theme.Name, name, len(lines), h)
@@ -53,7 +53,7 @@ func TestHostileDataStaysOnOneLine(t *testing.T) {
 	d.Runs[0].FailureLog = []string{"FAIL\tpkg\t0.1s", "\x1b[31mred\x1b[0m"}
 	cfg := config.New("", "", true, false, true)
 	for tab := range tabNames {
-		frame, err := Snapshot(cfg, d, tab, 120, 36, false, false)
+		frame, err := Snapshot(cfg, nil, d, tab, 120, 36, false, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -133,12 +133,12 @@ func TestBlend(t *testing.T) {
 	}
 }
 
-func TestDownsample(t *testing.T) {
-	got := downsample([]int{1, 1, 1, 1, 1, 1}, 3)
-	if len(got) != 3 || got[0]+got[1]+got[2] != 6 {
-		t.Errorf("downsample = %v", got)
+func TestDownsampleMax(t *testing.T) {
+	got := downsampleMax([]int{1, 5, 2, 2, 9, 0}, 3)
+	if len(got) != 3 || got[0] != 5 || got[1] != 2 || got[2] != 9 {
+		t.Errorf("downsampleMax = %v", got)
 	}
-	if got := downsample([]int{1, 2}, 5); len(got) != 2 {
+	if got := downsampleMax([]int{1, 2}, 5); len(got) != 2 {
 		t.Errorf("no-op downsample = %v", got)
 	}
 }

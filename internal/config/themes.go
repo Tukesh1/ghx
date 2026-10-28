@@ -20,6 +20,8 @@ type Theme struct {
 	Red           string
 	Cyan          string
 	Pink          string
+	// Heatmap is the 5-step contribution ramp, from "no contributions" to "most".
+	Heatmap [5]string
 }
 
 // Themes lists the palettes in the order the `t` key cycles through them.
@@ -41,6 +43,7 @@ var Themes = []Theme{
 		Red:           "#f85149",
 		Cyan:          "#39c5cf",
 		Pink:          "#db61a2",
+		Heatmap:       [5]string{"", "#0e4429", "#006d32", "#26a641", "#39d353"},
 	},
 	{
 		Name:          "Tokyo Night",
@@ -59,6 +62,7 @@ var Themes = []Theme{
 		Red:           "#f7768e",
 		Cyan:          "#7dcfff",
 		Pink:          "#ff007c",
+		Heatmap:       [5]string{"", "#2b3a2a", "#4d6b38", "#7a9f4f", "#9ece6a"},
 	},
 	{
 		Name:          "Catppuccin Mocha",
@@ -77,6 +81,7 @@ var Themes = []Theme{
 		Red:           "#f38ba8",
 		Cyan:          "#94e2d5",
 		Pink:          "#f5c2e7",
+		Heatmap:       [5]string{"", "#334a3a", "#4f7a55", "#7fb37a", "#a6e3a1"},
 	},
 	{
 		Name:          "Dracula",
@@ -95,17 +100,34 @@ var Themes = []Theme{
 		Red:           "#ff5555",
 		Cyan:          "#8be9fd",
 		Pink:          "#ff79c6",
+		Heatmap:       [5]string{"", "#1f5c36", "#2d8a4e", "#3cc365", "#50fa7b"},
+	},
+	{
+		Name:          "GitHub Light",
+		BgPrimary:     "#ffffff",
+		BgSurface:     "#f6f8fa",
+		BgElevated:    "#eaeef2",
+		BorderMuted:   "#d0d7de",
+		BorderActive:  "#0969da",
+		TextPrimary:   "#1f2328",
+		TextSecondary: "#59636e",
+		TextMuted:     "#8c959f",
+		Green:         "#1a7f37",
+		Blue:          "#0969da",
+		Purple:        "#8250df",
+		Yellow:        "#9a6700",
+		Red:           "#d1242f",
+		Cyan:          "#1b7c83",
+		Pink:          "#bf3989",
+		Heatmap:       [5]string{"#ebeef1", "#9be9a8", "#40c463", "#30a14e", "#216e39"},
 	},
 }
 
-// HeatmapPalette holds the 5 GitHub contribution intensity levels (0 → 13+ commits).
-var HeatmapPalette = [5]string{"#161b22", "#0e4429", "#006d32", "#26a641", "#39d353"}
-
 // ThemeIndex resolves a theme by display name or slug (e.g. "tokyo-night"); unknown names map to 0.
 func ThemeIndex(name string) int {
-	key := slug(name)
+	key := Slug(name)
 	for i, t := range Themes {
-		s := slug(t.Name)
+		s := Slug(t.Name)
 		if s == key || strings.HasPrefix(s, key) && key != "" {
 			return i
 		}
@@ -113,7 +135,17 @@ func ThemeIndex(name string) int {
 	return 0
 }
 
-func slug(s string) string {
+// Names lists the theme slugs accepted by --theme, e.g. "tokyo-night".
+func Names() []string {
+	out := make([]string, len(Themes))
+	for i, t := range Themes {
+		out[i] = Slug(t.Name)
+	}
+	return out
+}
+
+// Slug normalizes a theme name: "Tokyo Night" → "tokyo-night".
+func Slug(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.ReplaceAll(s, " ", "-")
 	return strings.ReplaceAll(s, "_", "-")

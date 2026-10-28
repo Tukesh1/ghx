@@ -87,8 +87,7 @@ func (m Model) insightsHeader(r gh.Repo, a *gh.RepoAnalytics, state string, w in
 	}
 	lines = append(lines, "")
 	perRow := 8
-	switch {
-	case inner < 8*13+7:
+	if inner < 8*16+7 {
 		perRow = 4
 	}
 	lines = append(lines, p.tileGrid(m.repoTiles(r, a), inner, perRow)...)
@@ -138,7 +137,7 @@ func (m Model) codeFreqPanel(a *gh.RepoAnalytics, w, h int) string {
 	p := m.p
 	inner := w - 4
 	room := h - panelChrome
-	title := p.fg(p.Purple, p.ic.File) + " CODE FREQUENCY · 26W"
+	title := p.fg(p.Purple, p.ic.File) + " CODE FREQUENCY"
 	if a == nil || len(a.CodeFreq) == 0 {
 		msg := "code frequency unavailable"
 		if a != nil && a.StatsPending {
@@ -146,27 +145,30 @@ func (m Model) codeFreqPanel(a *gh.RepoAnalytics, w, h int) string {
 		}
 		return p.panel(title, "", []string{p.muted(msg)}, nil, w, h, false)
 	}
-	adds := make([]int, len(a.CodeFreq))
-	dels := make([]int, len(a.CodeFreq))
+	// Show as many of the most recent weeks as fit, one column each.
+	weeks := a.CodeFreq
+	if len(weeks) > inner {
+		weeks = weeks[len(weeks)-inner:]
+	}
+	title += fmt.Sprintf(" · %dW", len(weeks))
+	adds := make([]int, len(weeks))
+	dels := make([]int, len(weeks))
 	ta, td := 0, 0
-	for i, d := range a.CodeFreq {
+	for i, d := range weeks {
 		adds[i], dels[i] = d.Add, d.Del
 		ta += d.Add
 		td += d.Del
 	}
-	if len(adds) > inner {
-		adds, dels = downsample(adds, inner), downsample(dels, inner)
-	}
-	colw, gap := 1, 0
-	if len(adds)*2 <= inner {
-		gap = 1
-	}
+	colw, gap := columnLayout(len(adds), inner)
 	chartRows := max(room-2, 2)
 	up := max(chartRows*6/10, 1)
 	down := max(chartRows-up, 1)
 	body := p.divergingChart(adds, dels, up, down, colw, gap)
-	body = append(body, p.fg(p.Green, "+"+compact(ta))+p.dim(" / ")+p.fg(p.Red, "−"+compact(td))+p.muted(fmt.Sprintf("  net %+d lines", ta-td)))
+	body = append(body, p.fg(p.Green, "+"+compact(ta))+p.dim(" / ")+p.fg(p.Red, "−"+compact(td))+p.muted(fmt.Sprintf("  net %s%s lines", map[bool]string{true: "+", false: "−"}[ta >= td], commaInt(abs(ta-td)))))
 	right := p.fg(p.Green, "▇ add") + " " + p.fg(p.Red, "▇ del")
+	if width(title)+width(right)+5 > w {
+		title = p.fg(p.Purple, p.ic.File) + " CODE FREQUENCY"
+	}
 	return p.panel(title, right, body, nil, w, h, false)
 }
 
@@ -182,12 +184,12 @@ func (m Model) trafficPanel(a *gh.RepoAnalytics, w, h int) string {
 		}, nil, w, h, false)
 	}
 	chartH := clamp((room-4)/2, 1, 5)
-	colw := max((inner-chartAxisWidth(a.Views))/max(len(a.Views), 1), 1)
+	colw, cgap := columnLayout(len(a.Views), inner-chartAxisWidth(a.Views))
 	var body []string
 	body = append(body, spread(p.bold(p.TextSecondary, "VIEWS"), p.bold(p.Cyan, commaInt(a.ViewsTotal))+p.muted(fmt.Sprintf(" · %d unique", a.ViewsUnique)), inner))
-	body = append(body, p.columnChart(a.Views, chartH, colw, 0, p.Cyan)...)
+	body = append(body, p.columnChart(a.Views, chartH, colw, cgap, p.Cyan)...)
 	body = append(body, spread(p.bold(p.TextSecondary, "CLONES"), p.bold(p.Purple, commaInt(a.ClonesTotal))+p.muted(fmt.Sprintf(" · %d unique", a.ClonesUnique)), inner))
-	body = append(body, p.columnChart(a.Clones, chartH, colw, 0, p.Purple)...)
+	body = append(body, p.columnChart(a.Clones, chartH, colw, cgap, p.Purple)...)
 	if left := room - len(body) - 1; left >= 3 && len(a.Referrers) > 0 {
 		cols := []column{{title: "Referrer", width: -1}, {title: "Views", width: 6, right: true}, {title: "Uniq", width: 5, right: true, drop: 1}}
 		var rows [][]string
@@ -245,7 +247,7 @@ func (m Model) languagesPanel(r gh.Repo, a *gh.RepoAnalytics, w, h int) string {
 		})
 	}
 	body = append(body, p.table(cols, rows, -1, inner, h-panelChrome-2, false)...)
-	return p.panel(title, p.muted(fmt.Sprintf("%d languages", len(langs))), body, nil, w, h, false)
+	return p.panel(title, p.muted(plural(len(langs), "language")), body, nil, w, h, false)
 }
 
 func (m Model) healthPanel(r gh.Repo, a *gh.RepoAnalytics, w, h int) string {

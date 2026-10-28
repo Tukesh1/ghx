@@ -25,8 +25,11 @@ func (m Model) splitTab(w, h int, left func(int, int) string, right func(int, in
 }
 
 // listPane renders a dedicated tab's table inside a titled panel.
-func (m Model) listPane(kind int, title, chips string, cols []column, rows [][]string, w, h int) string {
-	body := m.p.table(cols, rows, m.cursor[kind], w-4, h-panelChrome, true)
+func (m Model) listPane(kind int, title, chips string, cols []column, rows [][]string, w, h int, empty string) string {
+	if m.filter != "" {
+		empty = "Nothing matches “" + m.filter + "” · esc clears the filter"
+	}
+	body := m.p.tableEmpty(cols, rows, m.cursor[kind], w-4, h-panelChrome, true, empty)
 	return m.p.panel(title, chips, body, nil, w, h, true)
 }
 
@@ -66,28 +69,32 @@ func (m Model) boxPair(capA string, a []string, capB string, b []string, w int) 
 
 var prCols = []column{
 	{title: "PR #", width: 8},
-	{title: "Repository", width: -1, drop: 3},
-	{title: "Title & Branch", width: -3, min: 26},
-	{title: "Author", width: 12, drop: 4},
+	{title: "Title · Repository & Branch", width: -3, min: 26},
+	{title: "Author", width: 13, drop: 4},
 	{title: "Review", width: 15},
 	{title: "CI Checks", width: 16, drop: 1},
-	{title: "Mergeable", width: 11, drop: 2},
+	{title: "Merge", width: 11, drop: 2},
 	{title: "Diff", width: 11, drop: 5},
+	{title: "Updated", width: 7, right: true, drop: 3},
 }
 
 func (m Model) prRows(prs []gh.PullRequest) [][]string {
 	p := m.p
 	rows := make([][]string, 0, len(prs))
 	for _, pr := range prs {
+		author := p.fg(p.Cyan, "@"+pr.Author)
+		if pr.Author == m.data.User.Login {
+			author = p.muted("you")
+		}
 		rows = append(rows, []string{
 			p.prIcon(pr) + " " + p.bold(p.TextPrimary, fmt.Sprintf("#%d", pr.Number)),
-			p.bold(p.Blue, shortRepo(pr.Repo, m.data.User.Login)),
-			cell(p.text(pr.Title), p.muted(p.ic.Branch+" "+pr.HeadRef)),
-			p.fg(p.Cyan, pr.Author),
+			cell(p.text(pr.Title), m.repoRefMax(pr.Repo, 24)+p.muted(" · "+p.ic.Branch+" "+pr.HeadRef)),
+			author,
 			p.reviewBadge(pr),
 			p.ciBadge(pr.CIState, checksLabel(pr)),
 			p.mergeableBadge(pr),
 			p.diff(pr.Additions, pr.Deletions),
+			p.muted(ago(pr.UpdatedAt)),
 		})
 	}
 	return rows
@@ -98,33 +105,43 @@ func (m Model) viewPRs(w, h int) string {
 	p := m.p
 	return m.splitTab(w, h,
 		func(lw, h int) string {
-			chips := m.filterChips([]string{fmt.Sprintf("All Open (%d)", len(m.data.ActionPRs())), "Review Req", "Approved", "Changes Req"},
-				[]string{p.Blue, p.Yellow, p.Green, p.Red}, m.pill[kindPR])
-			title := titled(p.ic.PROpen+" PULL REQUESTS QUEUE", p.ic.PROpen+" PULL REQUESTS QUEUE (AUTHORED, REVIEW REQUESTED & MENTIONED)", chips, lw)
-			return m.listPane(kindPR, title, chips, prCols, m.prRows(m.prs()), lw, h)
+			chips := m.chipsFit([]string{fmt.Sprintf("All (%d)", len(m.data.ActionPRs())), "Needs Review", "Ready", "Needs Work"},
+				[]string{"All", "Review", "Ready", "Work"},
+				[]string{p.Blue, p.Yellow, p.Green, p.Red}, m.pill[kindPR], lw)
+			title := titled(p.ic.PROpen+" PULL REQUESTS", p.ic.PROpen+" PULL REQUESTS · REVIEW REQUESTED & AUTHORED", chips, lw)
+			return m.listPane(kindPR, title, chips, prCols, m.prRows(m.prs()), lw, h, "No pull requests here · f cycles filters")
 		},
 		m.prInspector)
 }
 
+// mergeState summarises what stands between a PR and the merge button.
 func mergeState(pr gh.PullRequest) string {
 	switch {
 	case pr.IsDraft:
 		return "DRAFT"
-	case !pr.Mergeable || pr.ReviewDecision == gh.ReviewChangesRequested:
-		return "BLOCKED"
+	case pr.Conflicting:
+		return "CONFLICTS"
+	case pr.ReviewDecision == gh.ReviewChangesRequested:
+		return "CHANGES REQUESTED"
 	case pr.CIState == gh.StateFailure:
-		return "UNSTABLE"
+		return "CI FAILING"
 	case pr.MergeReady():
-		return "CLEAN"
+		return "READY TO MERGE"
+	case pr.CIState == gh.StatePending:
+		return "CI RUNNING"
+	case pr.ReviewDecision == gh.ReviewRequired:
+		return "REVIEW REQUIRED"
+	case !pr.Mergeable:
+		return "CHECKING"
 	default:
-		return "REVIEW_REQUIRED"
+		return "BLOCKED"
 	}
 }
 
 func (m Model) prInspector(w, h int) string {
 	p := m.p
 	inner := w - 4
-	title := titled("PULL REQUEST INSPECTOR", "PULL REQUEST INSPECTOR (CHANGED FILES, REVIEWS & CHECKS)", "#00000", w)
+	title := titled("PULL REQUEST", "PULL REQUEST · REVIEWS, FILES & CHECKS", "#00000", w)
 	pr, ok := m.selectedPR()
 	if !ok {
 		return p.panel(title, "", []string{p.muted("no pull request selected")}, nil, w, h, false)
@@ -134,7 +151,7 @@ func (m Model) prInspector(w, h int) string {
 		b = append(b, p.bold(p.TextPrimary, l))
 	}
 	b = append(b,
-		p.fg(p.Blue, pr.Repo)+p.dim(" · ")+p.fg(p.Blue, p.ic.Branch+" "+pr.HeadRef)+p.dim(" "+p.ic.Arrow+" "+pr.BaseRef),
+		p.fg(p.Blue, pr.Repo)+p.dim(" · ")+p.fg(p.Cyan, p.ic.Branch+" "+pr.HeadRef)+p.dim(" "+p.ic.Arrow+" ")+p.muted(pr.BaseRef),
 		p.muted("by ")+p.fg(p.Cyan, "@"+pr.Author)+p.muted(" · updated "+ago(pr.UpdatedAt)+" ago"),
 		"")
 
@@ -146,12 +163,13 @@ func (m Model) prInspector(w, h int) string {
 		reviewers = []string{p.muted("none requested")}
 	}
 	state := mergeState(pr)
-	stateColor := map[string]string{"CLEAN": p.Green, "BLOCKED": p.Red, "UNSTABLE": p.Yellow, "DRAFT": p.TextSecondary}[state]
+	stateColor := map[string]string{"READY TO MERGE": p.Green, "CONFLICTS": p.Red, "CHANGES REQUESTED": p.Red, "CI FAILING": p.Red,
+		"DRAFT": p.TextSecondary, "CHECKING": p.TextSecondary}[state]
 	if stateColor == "" {
 		stateColor = p.Yellow
 	}
 	gate := []string{
-		p.muted("State: ") + p.bold(stateColor, state),
+		p.bold(stateColor, state),
 		p.muted("Files: ") + p.bold(p.TextPrimary, fmt.Sprint(pr.ChangedFiles)) + " (" + p.diff(pr.Additions, pr.Deletions) + ")",
 		p.diffBar(pr.Additions, pr.Deletions, clamp((inner-1)/2-4, 4, 24)),
 	}
@@ -160,10 +178,14 @@ func (m Model) prInspector(w, h int) string {
 
 	var files []string
 	for _, f := range pr.Files {
-		files = append(files, spread(p.fg(p.Cyan, p.ic.File+" "+f.Path), p.diff(f.Additions, f.Deletions), inner-2))
+		d := p.diff(f.Additions, f.Deletions)
+		files = append(files, fitMid(p.fg(p.Cyan, p.ic.File+" "+f.Path), inner-3-width(d))+" "+d)
 	}
 	if len(files) == 0 {
 		files = []string{p.muted("file list unavailable")}
+	}
+	if more := pr.ChangedFiles - len(pr.Files); more > 0 && len(pr.Files) > 0 {
+		files = append(files, p.dim(fmt.Sprintf("… %d more", more)))
 	}
 	b = append(b, p.box("Changed Files", files, inner)...)
 	b = append(b, "")
@@ -181,12 +203,23 @@ func (m Model) prInspector(w, h int) string {
 	}
 	b = append(b, p.box("CI Check Runs ("+ratio+")", checks, inner)...)
 
-	footer := append([]string{p.line(strings.Repeat("─", inner))}, m.buttons(inner,
-		[3]string{"a", p.ic.CheckPass + " Approve PR", p.Green},
-		[3]string{"m m", p.ic.PRMerged + " Squash & Merge", p.Purple},
-		[3]string{"c", fmt.Sprintf("%s gh pr checkout %d", p.ic.Branch, pr.Number), p.Blue},
+	var actions [][3]string
+	if pr.Author != m.data.User.Login && pr.ReviewDecision != gh.ReviewApproved {
+		actions = append(actions, [3]string{"a", p.ic.CheckPass + " Approve", p.Green})
+	}
+	if !pr.IsDraft && !pr.Conflicting {
+		color := p.Purple
+		if !pr.MergeReady() {
+			color = p.TextSecondary
+		}
+		actions = append(actions, [3]string{"m m", p.ic.PRMerged + " " + pr.MergeLabel(), color})
+	}
+	actions = append(actions,
+		[3]string{"c", p.ic.Branch + " Checkout", p.Blue},
+		[3]string{"C", p.ic.Comment + " Comment", p.Blue},
 		[3]string{"o", "Open", p.TextSecondary},
-	)...)
+	)
+	footer := append([]string{p.line(strings.Repeat("─", inner))}, m.buttons(inner, actions...)...)
 	return p.panel(title, p.badge(p.Purple, fmt.Sprintf("#%d", pr.Number)), b, footer, w, h, false)
 }
 

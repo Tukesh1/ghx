@@ -22,13 +22,36 @@ jobs:
           go-version: stable
       - name: Vet
         run: go vet ./...
-      - name: Test
-        run: go test ./...
+      - name: Test (race)
+        run: go test -race ./...
       - name: Build
         run: go build -o ghx${{ matrix.os == 'windows-latest' && '.exe' || '' }} .
       - name: Render check (every tab, every size)
         shell: bash
         run: ./ghx${{ matrix.os == 'windows-latest' && '.exe' || '' }} --demo --check
+
+  minimum-go:
+    name: Go version in go.mod
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go build ./... && go test ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
 
   install-script:
     runs-on: ubuntu-latest

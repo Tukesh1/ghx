@@ -1,0 +1,47 @@
+name: Bug report
+description: Something in ghx is broken or looks wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time! A screenshot or `ghx --snapshot` output helps a lot with layout bugs.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `ghx --demo`
+        2. Press `4`, then `enter`
+        3. …
+  - type: input
+    id: version
+    attributes:
+      label: ghx version
+      description: Output of `ghx --version`
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: OS, terminal and font
+      placeholder: macOS 15, Ghostty, JetBrainsMono Nerd Font
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Does it happen in demo mode (`ghx --demo`)?
+      options: ["Yes", "No, only with live data", "Not sure"]
+  - type: textarea
+    id: frame
+    attributes:
+      label: Snapshot (optional)
+      description: Output of `ghx --demo --snapshot --tab N --size WxH` (remove anything private).
+      render: text

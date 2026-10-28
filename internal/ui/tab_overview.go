@@ -68,6 +68,14 @@ func titled(short, long, right string, w int) string {
 	return short
 }
 
+// linkFits returns the right-hand link of a panel title bar, or "" when it would crowd the title.
+func linkFits(title, link string, w int) string {
+	if width(title)+width(link)+5 > w {
+		return ""
+	}
+	return link
+}
+
 // filterChips renders title-bar filter buttons; the active one is solid, the rest tinted.
 func (m Model) filterChips(names, colors []string, active int) string {
 	var out []string
@@ -81,16 +89,46 @@ func (m Model) filterChips(names, colors []string, active int) string {
 	return strings.Join(out, " ")
 }
 
+// chipsFit renders the full chip labels when they leave room for a title in a w-wide panel,
+// otherwise the short ones.
+func (m Model) chipsFit(full, short, colors []string, active, w int) string {
+	chips := m.filterChips(full, colors, active)
+	if width(chips)+26 > w {
+		chips = m.filterChips(short, colors, active)
+	}
+	return chips
+}
+
 func (m Model) link(s string) string { return m.p.fg(m.p.Blue, s) }
 
 var ovPRCols = []column{
 	{title: "PR", width: 7},
-	{title: "Repository & Branch", width: -2, drop: 2, min: 16},
+	{title: "Repository & Branch", width: -2, drop: 2, min: 16, mid: true},
 	{title: "Title & Author", width: -3, min: 21},
-	{title: "CI Checks", width: 15},
-	{title: "Review / Merge", width: 15, drop: 3},
-	{title: "Diff & Files", width: 11, drop: 4},
-	{title: "Quick Action", width: 11, drop: 1},
+	{title: "CI Checks", width: 16},
+	{title: "Review", width: 15, drop: 3},
+	{title: "Diff", width: 11, drop: 4},
+	{title: "Next", width: 10, drop: 1},
+}
+
+// repoRef renders owner/name with the name emphasised. The owner is dropped for the viewer's own
+// repositories and is optional elsewhere, so a narrow table cell keeps the distinguishing name.
+func (m Model) repoRef(full string) string {
+	p := m.p
+	owner, name, ok := strings.Cut(full, "/")
+	if !ok || strings.EqualFold(owner, m.data.User.Login) {
+		return p.bold(p.Blue, name)
+	}
+	return optional(p.fg(p.TextSecondary, owner+"/")) + p.bold(p.Blue, name)
+}
+
+// repoRefMax is repoRef capped at n cells: the owner goes first, then the name is cut in the middle.
+func (m Model) repoRefMax(full string, n int) string {
+	ref := m.repoRef(full)
+	if width(ref) <= n {
+		return strings.ReplaceAll(ref, optMark, "")
+	}
+	return strings.TrimRight(fitMid(dropOptional(ref), n), " ")
 }
 
 func (m Model) ovPRRows(prs []gh.PullRequest) [][]string {
@@ -103,7 +141,7 @@ func (m Model) ovPRRows(prs []gh.PullRequest) [][]string {
 		}
 		rows = append(rows, []string{
 			p.prIcon(pr) + " " + p.bold(p.TextPrimary, fmt.Sprintf("#%d", pr.Number)),
-			cell(p.bold(p.Blue, shortRepo(pr.Repo, m.data.User.Login)), p.muted(p.ic.Branch+" "+pr.HeadRef)),
+			cell(m.repoRef(pr.Repo), p.muted(p.ic.Branch+" "+pr.HeadRef)),
 			cell(p.text(pr.Title), p.muted(by)),
 			p.ciBadge(pr.CIState, checksLabel(pr)),
 			p.reviewBadge(pr),
@@ -129,7 +167,11 @@ func (m Model) prPanel(w, h int, focused bool) string {
 		chips = m.filterChips([]string{"All", "Review", "@me"}, []string{p.Blue, p.Yellow, p.Green}, m.quick)
 	}
 	title := titled(p.ic.PROpen+" PULL REQUESTS REQUIRING ACTION", p.ic.PROpen+" PULL REQUESTS REQUIRING ACTION (REVIEW QUEUE & READY TO MERGE)", chips, w)
-	body := p.table(ovPRCols, m.ovPRRows(m.prs()), m.cursor[kindPR], w-4, h-panelChrome, focused)
+	empty := "No open pull requests need you"
+	if m.filter != "" {
+		empty = "No pull requests match “" + m.filter + "”"
+	}
+	body := p.tableEmpty(ovPRCols, m.ovPRRows(m.prs()), m.cursor[kindPR], w-4, h-panelChrome, focused, empty)
 	return p.panel(title, chips, body, nil, w, h, focused)
 }
 
@@ -174,7 +216,7 @@ func (m Model) ovRunRows(runs []gh.WorkflowRun) [][]string {
 		}
 		rows = append(rows, []string{
 			p.runStateBadge(r),
-			cell(p.bold(p.TextPrimary, r.Name), p.fg(p.Blue, shortRepo(r.Repo, m.data.User.Login))),
+			cell(p.bold(p.TextPrimary, r.Name), m.repoRef(r.Repo)),
 			cell(p.muted(r.Branch), p.dim(p.ic.Commit+" "+r.SHA)),
 			d,
 			action,
@@ -199,6 +241,9 @@ func keyLogLines(log []string, n int) []string {
 	keep := map[int]bool{}
 	for _, kw := range []string{"panic", "--- fail", "##[error]", "error", "fail"} {
 		for i, l := range log {
+			if strings.HasPrefix(l, "▶ ") {
+				continue
+			}
 			if len(keep) < n && strings.Contains(strings.ToLower(l), kw) {
 				keep[i] = true
 			}
@@ -250,27 +295,28 @@ func (m Model) runsPanel(w, h int, focused bool) string {
 				job = " · " + j.Name
 			}
 		}
-		head := spread(p.bold(p.Red, fmt.Sprintf("%s FAILING LOG: %s (Run #%d%s)", p.ic.CheckFail, shortRepo(fr.Repo, m.data.User.Login), fr.ID, job)), p.fg(p.Cyan, "Full Log →"), w-6)
+		head := spread(p.bold(p.Red, fmt.Sprintf("%s FAILING LOG: %s (Run #%d%s)", p.ic.CheckFail, shortRepo(fr.Repo, m.data.User.Login), fr.ID, job)), p.fg(p.Cyan, "3 · logs →"), w-6)
 		logBox = append(logBox, head)
 		for _, l := range keyLogLines(fr.FailureLog, nLog-1) {
 			logBox = append(logBox, p.muted(l))
 		}
 		logBox = p.inset(logBox, w-4)
 	}
-	body := p.table(ovRunCols, m.ovRunRows(m.runs()), m.cursor[kindRun], w-4, inner-len(logBox), focused)
+	body := p.tableEmpty(ovRunCols, m.ovRunRows(m.runs()), m.cursor[kindRun], w-4, inner-len(logBox), focused, "No recent workflow runs in your active repositories")
 	for len(body) < inner-len(logBox) {
 		body = append(body, "")
 	}
 	body = append(body, logBox...)
 	right := m.link("All Runs →")
 	title := titled(p.ic.Play+" LIVE ACTIONS CI/CD", p.ic.Play+" LIVE ACTIONS CI/CD & BRANCH BUILDS", right, w)
+	right = linkFits(title, right, w)
 	return p.panel(title, right, body, nil, w, h, focused)
 }
 
 var ovRepoCols = []column{
-	{title: "Repository", width: -1, min: 14},
+	{title: "Repository", width: -1, min: 14, mid: true},
 	{title: "Branch & Sync", width: 18, drop: 2},
-	{title: "Latest Commit on Default Branch", width: -1, drop: 1},
+	{title: "Latest Commit", width: -1, drop: 1},
 	{title: "PRs / Issues", width: 15, drop: 5},
 	{title: "CI", width: 8},
 	{title: "★ Stars", width: 8, right: true, drop: 4},
@@ -311,7 +357,7 @@ func (m Model) ovRepoRows(repos []gh.Repo) [][]string {
 			meta += p.muted(" · " + r.Release)
 		}
 		rows = append(rows, []string{
-			cell(m.repoIcon(r)+" "+p.bold(p.Blue, shortRepo(r.NameWithOwner, m.data.User.Login)), meta),
+			cell(m.repoIcon(r)+" "+m.repoRef(r.NameWithOwner), meta),
 			cell(p.text(p.ic.Branch+" "+r.SyncBranch), m.syncText(r)),
 			p.dim(p.ic.Commit) + " " + p.fg(p.Yellow, r.LatestSHA) + " " + p.text(r.LatestMessage),
 			p.badge(p.Green, fmt.Sprintf("%d PRs", r.OpenPRs)) + " " + p.badge(p.Yellow, fmt.Sprintf("%d Iss", r.OpenIssues)),
@@ -325,8 +371,9 @@ func (m Model) ovRepoRows(repos []gh.Repo) [][]string {
 
 func (m Model) reposPanel(w, h int, focused bool) string {
 	p := m.p
-	right := m.link(fmt.Sprintf("Inspect All %d Repos →", len(m.data.Repos)))
+	right := m.link(fmt.Sprintf("All %s →", plural(len(m.data.Repos), "Repo")))
 	title := titled(p.ic.RepoPublic+" ACTIVE REPOSITORIES", p.ic.RepoPublic+" ACTIVE REPOSITORIES (BRANCH STATUS, LATEST COMMIT & OPEN WORK)", right, w)
+	right = linkFits(title, right, w)
 	body := p.table(ovRepoCols, m.ovRepoRows(m.repos()), m.cursor[kindRepo], w-4, h-panelChrome, focused)
 	return p.panel(title, right, body, nil, w, h, focused)
 }
@@ -334,7 +381,7 @@ func (m Model) reposPanel(w, h int, focused bool) string {
 var ovIssueCols = []column{
 	{title: "Issue", width: 7},
 	{title: "Title & Repo", width: -1, min: 22},
-	{title: "Labels & Priority", width: 12},
+	{title: "Priority", width: 12, drop: 3},
 	{title: "Linked PR", width: 9, drop: 1},
 	{title: "Updated", width: 7, right: true, drop: 2},
 }
@@ -348,8 +395,8 @@ func (m Model) ovIssueRows(issues []gh.Issue) [][]string {
 			linked = p.fg(p.Purple, fmt.Sprintf("PR #%d", is.LinkedPR))
 		}
 		rows = append(rows, []string{
-			p.bold(p.Yellow, fmt.Sprintf("%s #%d", p.ic.IssueOpen, is.Number)),
-			cell(p.text(is.Title), p.fg(p.Blue, shortRepo(is.Repo, m.data.User.Login))),
+			p.bold(p.priorityColor(is.Priority), fmt.Sprintf("%s #%d", p.ic.IssueOpen, is.Number)),
+			cell(p.text(is.Title), m.repoRef(is.Repo)),
 			p.priorityBadge(is.Priority),
 			linked,
 			p.muted(ago(is.UpdatedAt) + " ago"),
@@ -360,9 +407,10 @@ func (m Model) ovIssueRows(issues []gh.Issue) [][]string {
 
 func (m Model) issuesPanel(w, h int, focused bool) string {
 	p := m.p
-	right := m.link(fmt.Sprintf("All %d Issues →", len(m.data.Issues)))
+	right := m.link(fmt.Sprintf("All %s →", plural(len(m.data.Issues), "Issue")))
 	title := titled(p.ic.IssueOpen+" ASSIGNED ISSUES (@ME)", p.ic.IssueOpen+" ASSIGNED ISSUES & TRIAGE QUEUE (@ME)", right, w)
-	body := p.table(ovIssueCols, m.ovIssueRows(m.issues()), m.cursor[kindIssue], w-4, h-panelChrome, focused)
+	right = linkFits(title, right, w)
+	body := p.tableEmpty(ovIssueCols, m.ovIssueRows(m.issues()), m.cursor[kindIssue], w-4, h-panelChrome, focused, "No open issues are assigned to you")
 	return p.panel(title, right, body, nil, w, h, focused)
 }
 

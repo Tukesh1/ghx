@@ -1,23 +1,17 @@
 package github
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
 	"math/rand"
-	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
-
-// ErrStatsPending is returned when GitHub answers 202: repository statistics are still being computed.
-var ErrStatsPending = errors.New("github is computing repository statistics")
 
 const repoInsightsQuery = `
 query GhxRepoInsights($owner: String!, $name: String!) {
@@ -43,45 +37,40 @@ query GhxRepoInsights($owner: String!, $name: String!) {
 }`
 
 type insightsResponse struct {
-	Data struct {
-		Repository *struct {
-			Watchers    struct{ TotalCount int } `json:"watchers"`
-			DiskUsage   int                      `json:"diskUsage"`
-			LicenseInfo *struct {
-				SpdxID string `json:"spdxId"`
-				Name   string `json:"name"`
-			} `json:"licenseInfo"`
-			RepositoryTopics struct {
-				Nodes []struct {
-					Topic struct {
-						Name string `json:"name"`
-					} `json:"topic"`
-				} `json:"nodes"`
-			} `json:"repositoryTopics"`
-			HomepageURL  string                   `json:"homepageUrl"`
-			CreatedAt    time.Time                `json:"createdAt"`
-			IsFork       bool                     `json:"isFork"`
-			IsArchived   bool                     `json:"isArchived"`
-			Releases     struct{ TotalCount int } `json:"releases"`
-			Refs         struct{ TotalCount int } `json:"refs"`
-			ClosedIssues struct{ TotalCount int } `json:"closedIssues"`
-			MergedPRs    struct{ TotalCount int } `json:"mergedPRs"`
-			ClosedPRs    struct{ TotalCount int } `json:"closedPRs"`
-			Languages    struct {
-				TotalSize int `json:"totalSize"`
-				Edges     []struct {
-					Size int `json:"size"`
-					Node struct {
-						Name  string `json:"name"`
-						Color string `json:"color"`
-					} `json:"node"`
-				} `json:"edges"`
-			} `json:"languages"`
-		} `json:"repository"`
-	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
+	Repository *struct {
+		Watchers    struct{ TotalCount int } `json:"watchers"`
+		DiskUsage   int                      `json:"diskUsage"`
+		LicenseInfo *struct {
+			SpdxID string `json:"spdxId"`
+			Name   string `json:"name"`
+		} `json:"licenseInfo"`
+		RepositoryTopics struct {
+			Nodes []struct {
+				Topic struct {
+					Name string `json:"name"`
+				} `json:"topic"`
+			} `json:"nodes"`
+		} `json:"repositoryTopics"`
+		HomepageURL  string                   `json:"homepageUrl"`
+		CreatedAt    time.Time                `json:"createdAt"`
+		IsFork       bool                     `json:"isFork"`
+		IsArchived   bool                     `json:"isArchived"`
+		Releases     struct{ TotalCount int } `json:"releases"`
+		Refs         struct{ TotalCount int } `json:"refs"`
+		ClosedIssues struct{ TotalCount int } `json:"closedIssues"`
+		MergedPRs    struct{ TotalCount int } `json:"mergedPRs"`
+		ClosedPRs    struct{ TotalCount int } `json:"closedPRs"`
+		Languages    struct {
+			TotalSize int `json:"totalSize"`
+			Edges     []struct {
+				Size int `json:"size"`
+				Node struct {
+					Name  string `json:"name"`
+					Color string `json:"color"`
+				} `json:"node"`
+			} `json:"edges"`
+		} `json:"languages"`
+	} `json:"repository"`
 }
 
 func (c *Client) fetchInsightsGraphQL(ctx context.Context, repo string, a *RepoAnalytics) error {
@@ -89,33 +78,12 @@ func (c *Client) fetchInsightsGraphQL(ctx context.Context, repo string, a *RepoA
 	if !ok {
 		return fmt.Errorf("bad repo name %q", repo)
 	}
-	body, err := json.Marshal(map[string]any{"query": repoInsightsQuery, "variables": map[string]string{"owner": owner, "name": name}})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, graphqlURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("graphql: HTTP %d", resp.StatusCode)
-	}
 	var out insightsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := c.graphQL(ctx, repoInsightsQuery, map[string]any{"owner": owner, "name": name}, &out); err != nil {
 		return err
 	}
-	r := out.Data.Repository
+	r := out.Repository
 	if r == nil {
-		if len(out.Errors) > 0 {
-			return fmt.Errorf("graphql: %s", out.Errors[0].Message)
-		}
 		return fmt.Errorf("repository %s not found", repo)
 	}
 	a.Watchers = r.Watchers.TotalCount
@@ -198,8 +166,8 @@ func (c *Client) FetchRepoAnalytics(ctx context.Context, repo string) (*RepoAnal
 		if err := c.get(ctx, "/repos/"+repo+"/stats/code_frequency", &rows); err != nil {
 			return err
 		}
-		if len(rows) > 26 {
-			rows = rows[len(rows)-26:]
+		if len(rows) > 52 {
+			rows = rows[len(rows)-52:]
 		}
 		mu.Lock()
 		defer mu.Unlock()
@@ -350,13 +318,13 @@ func MockAnalytics(r Repo) *RepoAnalytics {
 		}
 		a.CommitWeeks = append(a.CommitWeeks, v)
 	}
-	for w := 0; w < 26; w++ {
+	for w := 0; w < 52; w++ {
 		add := int(scale * 60 * (0.3 + rng.Float64()*1.4))
 		del := int(float64(add) * (0.2 + rng.Float64()*0.7))
 		if rng.Float64() < 0.08 {
 			add *= 4
 		}
-		a.CodeFreq = append(a.CodeFreq, WeekDelta{Week: now.AddDate(0, 0, -7*(26-w)), Add: add, Del: del})
+		a.CodeFreq = append(a.CodeFreq, WeekDelta{Week: now.AddDate(0, 0, -7*(52-w)), Add: add, Del: del})
 	}
 	people := []string{"octocat", "kdubois", "hsuzuki", "priya-r", "lchen", "jmartin", "dependabot[bot]", "release-bot"}
 	rng.Shuffle(len(people)-1, func(i, j int) { people[i+1], people[j+1] = people[j+1], people[i+1] })

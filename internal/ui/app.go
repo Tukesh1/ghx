@@ -9,6 +9,7 @@ import (
 
 	"github.com/Tukesh1/ghx/internal/config"
 	gh "github.com/Tukesh1/ghx/internal/github"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -18,15 +19,16 @@ import (
 const (
 	minWidth   = 80
 	minHeight  = 24
-	toastTTL   = 3 * time.Second
+	toastTTL   = 4 * time.Second
 	pageMargin = 1
 	// navRows are the fixed rows above the KPI strip: header, tab bar and tab rule.
 	navRows = 3
 )
 
-// Tab indices, matching the 1-5 hotkeys.
+// Tab indices, matching the 1-6 hotkeys.
 const (
-	tabOverview = iota
+	tabProfile = iota
+	tabOverview
 	tabPRs
 	tabActions
 	tabRepos
@@ -34,18 +36,43 @@ const (
 )
 
 // Data kinds; each dedicated tab shows one kind and the Command Center focuses one at a time.
+// The first four map onto the tabs from tabPRs on; kindPinned is the Profile tab's pinned repositories.
 const (
 	kindPR = iota
 	kindRun
 	kindRepo
 	kindIssue
+	kindPinned
 )
 
+// Exported tab indices for --snapshot and tools/screenshot, so callers never hard-code positions.
+// TabInsights is the full-screen repository insights view, one past the last tab.
+const (
+	TabProfile  = tabProfile
+	TabOverview = tabOverview
+	TabPRs      = tabPRs
+	TabActions  = tabActions
+	TabRepos    = tabRepos
+	TabIssues   = tabIssues
+	TabInsights = tabIssues + 1
+)
+
+// TabCount is the number of tabs, bound to the 1…TabCount hotkeys.
+func TabCount() int { return len(tabNames) }
+
+// tabKey is the hotkey that opens a tab.
+func tabKey(tab int) string { return fmt.Sprint(tab + 1) }
+
+// tabFor is the dedicated tab of a data kind.
+func tabFor(kind int) int { return kind + tabPRs }
+
 var (
-	tabNames      = []string{"Command Center", "Pull Requests", "Actions CI/CD", "Repositories", "Issues & Bugs"}
-	shortTabNames = []string{"Overview", "PRs", "Actions", "Repos", "Issues"}
+	tabNames      = []string{"Profile", "Command Center", "Pull Requests", "Actions CI/CD", "Repositories", "Issues & Bugs"}
+	shortTabNames = []string{"Profile", "Overview", "PRs", "Actions", "Repos", "Issues"}
 	// pillCount is the number of filter chips per dedicated tab, cycled with f.
 	pillCount = [4]int{4, 4, 4, 4}
+	// retryBackoff spaces out automatic retries after a failed fetch.
+	retryBackoff = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute}
 )
 
 // spin returns the current loading-spinner frame for the active glyph set.
@@ -67,34 +94,27 @@ type dataMsg struct {
 	err error
 }
 
-type actionMsg struct {
-	label   string
-	res     gh.ActionResult
-	refresh bool
-	after   func(*Model)
-}
-
 type tickMsg time.Time
 
 type analyticsMsg struct {
 	repo    string
 	a       *gh.RepoAnalytics
 	err     error
-	retried bool
+	attempt int
 }
 
-func analyticsCmd(c *gh.Client, repo string) tea.Cmd {
+func analyticsCmd(c *gh.Client, repo string, attempt int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		a, err := c.FetchRepoAnalytics(ctx, repo)
-		return analyticsMsg{repo: repo, a: a, err: err}
+		return analyticsMsg{repo: repo, a: a, err: err, attempt: attempt}
 	}
 }
 
 // ensureAnalytics starts loading insight data for the repo under the cursor when the Repos tab shows it.
 func (m *Model) ensureAnalytics() tea.Cmd {
-	if m.tab != tabRepos || m.demo() || m.client == nil {
+	if m.tab != tabRepos || m.demo() {
 		return nil
 	}
 	r, ok := m.selectedRepo()
@@ -106,7 +126,7 @@ func (m *Model) ensureAnalytics() tea.Cmd {
 		return nil
 	}
 	m.analyticsLoading[name] = true
-	return analyticsCmd(m.client, name)
+	return analyticsCmd(m.client, name, 0)
 }
 
 // Model is the root Bubbletea model for ghx.
@@ -119,7 +139,7 @@ type Model struct {
 	width, height int
 	tab           int
 	focus         int
-	cursor        [4]int
+	cursor        [5]int
 	pill          [4]int
 	quick         int
 	notifCursor   int
@@ -132,12 +152,19 @@ type Model struct {
 	showNotifs bool
 	insights   bool
 
+	composer  textarea.Model
+	composeTo *commentTarget
+
 	// Per-repo analytics, loaded lazily when a repo is inspected (maps are shared across model copies).
 	analytics        map[string]*gh.RepoAnalytics
 	analyticsLoading map[string]bool
 	analyticsErr     map[string]string
 
 	loading   bool
+	fetchErr  string    // last fetch error while there is no data to show
+	failures  int       // consecutive failed fetches, for backoff
+	nextFetch time.Time // when the next automatic fetch is due; zero = none
+	busy      int       // mutations in flight
 	frame     int
 	status    string
 	kind      statusKind
@@ -153,7 +180,7 @@ func New(cfg *config.Config, client *gh.Client, demoNote string) Model {
 	ti.Placeholder = "Filter PRs, repos, branches, workflows, issues…"
 	ti.Prompt = ""
 	ti.CharLimit = 80
-	m := Model{cfg: cfg, client: client, search: ti,
+	m := Model{cfg: cfg, client: client, search: ti, tab: tabOverview,
 		analytics: map[string]*gh.RepoAnalytics{}, analyticsLoading: map[string]bool{}, analyticsErr: map[string]string{}}
 	m.applyTheme()
 	if client == nil {
@@ -164,8 +191,8 @@ func New(cfg *config.Config, client *gh.Client, demoNote string) Model {
 		}
 	} else {
 		m.loading = true
-		m.status = "fetching GitHub dashboard…"
-		if cached, err := gh.LoadCache(cfg.Org); err == nil {
+		m.status = "fetching your GitHub dashboard…"
+		if cached, err := gh.LoadCache(cfg.Org); err == nil && cached.User.Login != "" {
 			m.data = cached
 			m.status = "cached snapshot from " + ago(cached.FetchedAt) + " ago · refreshing…"
 		}
@@ -181,13 +208,22 @@ func (m *Model) applyTheme() {
 	m.search.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(t.BorderActive))
 }
 
-// Init starts the first fetch (live mode) and the clock tick.
+// Init starts the first fetch (live mode) and the single clock tick that drives the whole UI.
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{tick(time.Second)}
+	cmds := []tea.Cmd{tick(m.tickInterval())}
 	if m.client != nil {
-		cmds = append(cmds, fetchCmd(m.client, m.cfg.Org), tick(120*time.Millisecond))
+		cmds = append(cmds, fetchCmd(m.client, m.cfg.Org))
 	}
 	return tea.Batch(cmds...)
+}
+
+// tickInterval is fast while something animates (spinner) and once a second otherwise.
+// Exactly one tick is ever in flight: only the tickMsg handler schedules the next one.
+func (m Model) tickInterval() time.Duration {
+	if m.loading || m.busy > 0 || len(m.analyticsLoading) > 0 {
+		return 120 * time.Millisecond
+	}
+	return time.Second
 }
 
 func tick(d time.Duration) tea.Cmd {
@@ -196,16 +232,28 @@ func tick(d time.Duration) tea.Cmd {
 
 func fetchCmd(c *gh.Client, org string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		d, err := c.Fetch(ctx, org)
 		return dataMsg{d: d, err: err}
 	}
 }
 
-func ghCmd(label string, args []string, refresh bool) tea.Cmd {
-	return func() tea.Msg {
-		return actionMsg{label: label, res: gh.RunGH(args...), refresh: refresh}
+// startFetch begins a dashboard fetch; callers must check m.loading first.
+func (m *Model) startFetch(status string) tea.Cmd {
+	m.loading = true
+	m.nextFetch = time.Time{}
+	if status != "" {
+		m.setStatus(statusInfo, "ghx: "+status)
+	}
+	return fetchCmd(m.client, m.cfg.Org)
+}
+
+// scheduleFetch moves the next automatic fetch earlier (never later).
+func (m *Model) scheduleFetch(in time.Duration) {
+	at := time.Now().Add(in)
+	if m.nextFetch.IsZero() || at.Before(m.nextFetch) {
+		m.nextFetch = at
 	}
 }
 
@@ -218,51 +266,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.frame++
-		if m.loading {
-			return m, tick(120 * time.Millisecond)
+		var cmds []tea.Cmd
+		if m.client != nil && !m.loading && !m.nextFetch.IsZero() && time.Now().After(m.nextFetch) {
+			status := "auto-refreshing…"
+			if m.failures > 0 {
+				status = "retrying…"
+			}
+			cmds = append(cmds, m.startFetch(status))
 		}
-		if m.client != nil && m.data != nil && !m.data.Demo && time.Since(m.data.FetchedAt) > 5*time.Minute {
-			m.loading = true
-			m.setStatus(statusInfo, "auto-refreshing…")
-			return m, tea.Batch(fetchCmd(m.client, m.cfg.Org), tick(120*time.Millisecond))
-		}
-		return m, tick(time.Second)
+		return m, tea.Batch(append(cmds, tick(m.tickInterval()))...)
 
 	case dataMsg:
-		m.loading = false
-		if msg.err != nil {
-			if m.data == nil {
-				m.data = gh.MockDashboard()
-				m.setStatus(statusErr, "live fetch failed ("+msg.err.Error()+") · showing demo data")
-			} else {
-				m.setStatus(statusErr, "refresh failed: "+msg.err.Error())
-			}
-			return m, tick(time.Second)
-		}
-		m.data = msg.d
-		m.clampCursors()
-		_ = gh.SaveCache(m.data, m.cfg.Org)
-		m.setStatus(statusInfo, "")
-		return m, tick(time.Second)
+		return m.handleData(msg)
 
 	case actionMsg:
-		if msg.res.Err != nil {
-			out := msg.res.Output
-			if out == "" {
-				out = msg.res.Err.Error()
-			}
-			m.notify(statusErr, msg.label+" failed: "+firstLine(out))
-			return m, nil
-		}
-		if msg.after != nil {
-			msg.after(&m)
-		}
-		m.notify(statusOK, msg.label)
-		if msg.refresh && m.client != nil && !m.loading {
-			m.loading = true
-			return m, tea.Batch(fetchCmd(m.client, m.cfg.Org), tick(120*time.Millisecond))
-		}
-		return m, nil
+		return m.handleAction(msg)
 
 	case analyticsMsg:
 		delete(m.analyticsLoading, msg.repo)
@@ -271,28 +289,82 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.analytics[msg.repo] = msg.a
-		// GitHub answers 202 while it computes statistics; retry once shortly after.
-		if msg.a.StatsPending && !msg.retried && m.client != nil {
-			repo := msg.repo
-			client := m.client
-			return m, tea.Tick(5*time.Second, func(time.Time) tea.Msg {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				a, err := client.FetchRepoAnalytics(ctx, repo)
-				return analyticsMsg{repo: repo, a: a, err: err, retried: true}
-			})
+		// GitHub answers 202 while it computes statistics; retry a few times shortly after.
+		if msg.a.StatsPending && msg.attempt < 3 && m.client != nil {
+			m.analyticsLoading[msg.repo] = true
+			client, repo, next := m.client, msg.repo, msg.attempt+1
+			return m, tea.Tick(4*time.Second, func(time.Time) tea.Msg { return analyticsCmd(client, repo, next)() })
 		}
 		return m, nil
 
 	case tea.MouseMsg:
+		if m.data == nil {
+			return m, nil
+		}
 		next, cmd := m.handleMouse(msg)
 		mm := next.(Model)
 		return mm, tea.Batch(cmd, mm.ensureAnalytics())
 
 	case tea.KeyMsg:
+		if m.data == nil {
+			return m.errorScreenKey(msg)
+		}
 		next, cmd := m.handleKey(msg)
 		mm := next.(Model)
 		return mm, tea.Batch(cmd, mm.ensureAnalytics())
+	}
+	if m.composeTo != nil {
+		var cmd tea.Cmd
+		m.composer, cmd = m.composer.Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m Model) handleData(msg dataMsg) (tea.Model, tea.Cmd) {
+	m.loading = false
+	if msg.err != nil {
+		m.failures++
+		wait := retryBackoff[min(m.failures-1, len(retryBackoff)-1)]
+		m.nextFetch = time.Now().Add(wait)
+		if m.data == nil {
+			m.fetchErr = msg.err.Error()
+			return m, nil
+		}
+		m.setStatus(statusErr, fmt.Sprintf("ghx: refresh failed (%s) · retrying in %s · showing data from %s ago", firstLine(msg.err.Error()), wait, ago(m.data.FetchedAt)))
+		return m, nil
+	}
+	m.failures, m.fetchErr = 0, ""
+	m.nextFetch = time.Now().Add(m.cfg.Refresh)
+	m.data = msg.d
+	m.clampCursors()
+	_ = gh.SaveCache(m.data, m.cfg.Org)
+	if n := len(msg.d.Warnings); n > 0 {
+		more := ""
+		if n > 1 {
+			more = fmt.Sprintf(" (+%d more)", n-1)
+		}
+		m.setStatus(statusErr, "ghx: partial data · "+msg.d.Warnings[0]+more)
+	} else {
+		m.setStatus(statusInfo, "")
+	}
+	return m, nil
+}
+
+// errorScreenKey handles keys while live data has never loaded.
+func (m Model) errorScreenKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q", "esc":
+		return m, tea.Quit
+	case "r", "enter":
+		if !m.loading && m.client != nil {
+			m.fetchErr = ""
+			return m, m.startFetch("")
+		}
+	case "d":
+		m.data = gh.MockDashboard()
+		m.nextFetch = time.Time{}
+		m.setStatus(statusErr, "ghx: demo data · live fetch failed: "+firstLine(m.fetchErr)+" · press R to retry")
 	}
 	return m, nil
 }
@@ -312,6 +384,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
+	if m.composeTo != nil {
+		return m.composerKey(msg)
+	}
 
 	if m.searching {
 		switch key {
@@ -320,7 +395,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.search.Blur()
 			m.search.SetValue("")
 			m.filter = ""
-			m.cursor = [4]int{}
+			m.cursor = [5]int{}
 			return m, nil
 		case "enter", "down", "up":
 			m.searching = false
@@ -331,7 +406,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.search, cmd = m.search.Update(msg)
 		if v := m.search.Value(); v != m.filter {
 			m.filter = v
-			m.cursor = [4]int{}
+			m.cursor = [5]int{}
 		}
 		return m, cmd
 	}
@@ -360,8 +435,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			m.move(-1)
 			return m, nil
+		case "g", "home":
+			m.notifCursor = 0
+			return m, nil
+		case "G", "end":
+			m.notifCursor = max(len(m.data.Notifications)-1, 0)
+			return m, nil
+		case "enter", "o":
+			return m.openNotification()
 		case "m":
 			return m.markAllRead()
+		case "y":
+			return m.yank()
 		case "q":
 			return m, tea.Quit
 		}
@@ -370,22 +455,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "q":
 		return m, tea.Quit
-	case "1", "2", "3", "4", "5":
-		m.tab = int(key[0] - '1')
-		m.insights = false
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		if n := int(key[0] - '1'); n < len(tabNames) {
+			m.tab, m.insights = n, false
+		}
 	case "backspace":
 		m.insights = false
 	case "tab", "l", "right":
 		if m.tab == tabOverview {
 			m.focus = (m.focus + 1) % 4
 		} else if key == "tab" {
-			m.tab = m.tab%4 + 1
+			m.tab, m.insights = cycleTab(m.tab, 1), false
 		}
 	case "shift+tab", "h", "left":
 		if m.tab == tabOverview {
 			m.focus = (m.focus + 3) % 4
 		} else if key == "shift+tab" {
-			m.tab = (m.tab+2)%4 + 1
+			m.tab, m.insights = cycleTab(m.tab, -1), false
 		}
 	case "/":
 		m.searching = true
@@ -399,11 +485,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.filter = ""
 		m.search.SetValue("")
-		m.cursor = [4]int{}
+		m.cursor = [5]int{}
 	case "j", "down":
 		m.move(1)
 	case "k", "up":
 		m.move(-1)
+	case "ctrl+d", "pgdown":
+		m.move(5)
+	case "ctrl+u", "pgup":
+		m.move(-5)
 	case "g", "home":
 		m.cursor[m.activeKind()] = 0
 	case "G", "end":
@@ -414,8 +504,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openFocused()
 		case tabRepos:
 			m.insights = !m.insights
+		default:
+			return m.openInBrowser()
 		}
 	case "f":
+		if m.tab == tabProfile {
+			break
+		}
 		if m.tab == tabOverview {
 			if m.focus == kindPR {
 				m.quick = (m.quick + 1) % 3
@@ -429,10 +524,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		t := m.cfg.CycleTheme()
 		m.applyTheme()
+		m.saveConfig()
 		m.setStatus(statusInfo, "ghx: theme → "+t.Name)
 	case "i":
 		m.cfg.ASCII = !m.cfg.ASCII
+		m.cfg.GlyphsChosen = true
 		m.applyTheme()
+		m.saveConfig()
 		m.setStatus(statusInfo, "ghx: glyphs → "+m.cfg.FontMode())
 	case "n":
 		m.showNotifs = !m.showNotifs
@@ -445,46 +543,101 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.merge()
 	case "c":
 		return m.checkoutCloneComment()
+	case "C":
+		return m.startComment()
 	case "r":
 		return m.rerunOrRefresh()
+	case "R":
+		return m.refresh()
 	case "w":
 		return m.dispatchWorkflow()
 	case "x":
 		return m.closeIssue()
 	case "o":
 		return m.openInBrowser()
+	case "O":
+		return m.openProfile()
+	case "y":
+		return m.yank()
 	case "u", "U":
 		idx := 0
 		if key == "U" {
 			idx = 1
 		}
-		return m.bumpAlert(idx)
+		return m.openAlert(idx)
 	}
 	m.clampCursors()
 	return m, nil
 }
 
+func (m Model) saveConfig() {
+	if err := m.cfg.Save(); err != nil {
+		m.setStatus(statusErr, "ghx: could not save settings: "+err.Error())
+	}
+}
+
 // openFocused jumps from a Command Center panel to its dedicated tab, keeping the selection.
 func (m *Model) openFocused() {
-	if m.focus == kindPR {
+	kind := m.focus
+	var key string
+	switch kind {
+	case kindPR:
 		if pr, ok := m.selectedPR(); ok {
-			m.tab, m.pill[kindPR] = tabPRs, 0
-			for i, x := range m.prs() {
-				if x.Repo == pr.Repo && x.Number == pr.Number {
-					m.cursor[kindPR] = i
-				}
-			}
-			return
+			key = pr.Key()
+		}
+	case kindRun:
+		if r, ok := m.selectedRun(); ok {
+			key = fmt.Sprint(r.ID)
+		}
+	case kindRepo:
+		if r, ok := m.selectedRepo(); ok {
+			key = r.NameWithOwner
+		}
+	case kindIssue:
+		if is, ok := m.selectedIssue(); ok {
+			key = fmt.Sprintf("%s#%d", is.Repo, is.Number)
 		}
 	}
-	m.tab = m.focus + 1
-	m.pill[m.focus] = 0
+	m.tab, m.pill[kind] = tabFor(kind), 0
+	m.cursor[kind] = 0
+	for i, k := range m.itemKeys(kind) {
+		if k == key {
+			m.cursor[kind] = i
+		}
+	}
+}
+
+// itemKeys lists stable identities of the visible items of a kind, in display order.
+func (m Model) itemKeys(kind int) []string {
+	var keys []string
+	switch kind {
+	case kindPR:
+		for _, x := range m.prs() {
+			keys = append(keys, x.Key())
+		}
+	case kindRun:
+		for _, x := range m.runs() {
+			keys = append(keys, fmt.Sprint(x.ID))
+		}
+	case kindRepo:
+		for _, x := range m.repos() {
+			keys = append(keys, x.NameWithOwner)
+		}
+	case kindIssue:
+		for _, x := range m.issues() {
+			keys = append(keys, fmt.Sprintf("%s#%d", x.Repo, x.Number))
+		}
+	}
+	return keys
 }
 
 // overviewKPITabs maps each KPI card to the tab it opens.
 var overviewKPITabs = []int{tabPRs, tabPRs, tabActions, tabIssues, tabRepos}
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.composeTo != nil {
+		return m, nil
+	}
 	switch msg.Button {
 	case tea.MouseButtonWheelDown:
 		m.move(1)
@@ -496,7 +649,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
-	if msg.Action != tea.MouseActionPress || m.data == nil {
+	if msg.Action != tea.MouseActionPress {
 		return m, nil
 	}
 	w, h := m.width, m.height
@@ -506,17 +659,23 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.showNotifs {
-		if x < w-drawerWidth(w) {
+		if x < w-drawerWidth(w)-1 {
 			m.showNotifs = false
-		} else if idx := (y - m.bodyTop() - 2) / 3; idx >= 0 && idx < len(m.data.Notifications) {
+		} else if idx := m.notifAt(y - m.bodyTop()); idx >= 0 {
+			if idx == m.notifCursor {
+				return m.openNotification()
+			}
 			m.notifCursor = idx
 		}
 		return m, nil
 	}
-	if y == 1 {
+	switch y {
+	case 0:
+		return m.clickHeader(x)
+	case 1:
 		for i, r := range m.tabRanges() {
 			if x >= r[0] && x < r[1] {
-				m.tab = i
+				m.tab, m.insights = i, false
 			}
 		}
 		return m, nil
@@ -540,16 +699,23 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.tab == tabProfile {
+		return m.clickProfile(x, by, w, bodyH)
+	}
 	if m.tab != tabOverview {
 		if m.insights {
 			return m, nil
 		}
 		lw, _ := split(w, splitRatio(m.tab))
 		if x < lw {
-			before := m.cursor[m.tab-1]
-			m.clickRow(m.tab-1, by, bodyH, false)
-			if m.tab == tabRepos && m.cursor[kindRepo] == before && by >= panelChrome {
-				m.insights = true
+			kind := m.activeKind()
+			before := m.cursor[kind]
+			if m.clickRow(kind, by, bodyH, false) && m.cursor[kind] == before {
+				if m.tab == tabRepos {
+					m.insights = true
+					return m, nil
+				}
+				return m.openInBrowser()
 			}
 		}
 		return m, nil
@@ -573,37 +739,60 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// clickRow selects the table row under relY inside a panel of height panelH; a second click on the
-// selected Command Center row opens its dedicated tab.
-func (m *Model) clickRow(kind, relY, panelH int, overview bool) {
+// clickHeader makes the header's theme, glyph, inbox and keys controls clickable.
+func (m Model) clickHeader(x int) (tea.Model, tea.Cmd) {
+	plain := ansi.Strip(m.header(m.width))
+	at := func(label string) bool {
+		i := strings.Index(plain, label)
+		if i < 0 {
+			return false
+		}
+		start := ansi.StringWidth(plain[:i])
+		return x >= start-2 && x < start+ansi.StringWidth(label)+8
+	}
+	switch {
+	case at("THEME"):
+		return m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	case at("GLYPHS"):
+		return m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	case at("Inbox"):
+		m.showNotifs, m.notifCursor = true, 0
+	case at("Keys"):
+		m.showHelp = true
+	}
+	return m, nil
+}
+
+// clickRow selects the table row under relY inside a panel of height panelH and reports whether a
+// row was hit. A second click on the selected Command Center row opens its dedicated tab.
+func (m *Model) clickRow(kind, relY, panelH int, overview bool) bool {
 	wasFocused := m.focus == kind
 	if overview {
 		m.focus = kind
 	}
 	tableH := panelH - panelChrome
 	if overview && kind == kindRun {
-		if n := m.logBoxLines(tableH); n > 0 {
-			tableH -= n
-		}
+		tableH -= m.logBoxLines(tableH)
 	}
 	line := relY - panelChrome
 	if line < 0 {
-		return
+		return false
 	}
 	n := m.listLen(kind)
-	start, mode := tableLayout(n, m.cursor[kind], tableH-1, m.kindHasSub(kind, overview))
+	start, mode := tableLayout(n, m.cursor[kind], tableH-1, rowsHaveSub(m.rowsFor(kind, overview)))
 	if line%mode.step() >= mode.lines {
-		return
+		return false
 	}
 	idx := start + line/mode.step()
 	if idx >= n || line >= tableH-1 {
-		return
+		return false
 	}
 	if overview && wasFocused && idx == m.cursor[kind] {
 		m.openFocused()
-		return
+		return true
 	}
 	m.cursor[kind] = idx
+	return true
 }
 
 func (m Model) listLen(kind int) int {
@@ -614,29 +803,55 @@ func (m Model) listLen(kind int) int {
 		return len(m.runs())
 	case kindRepo:
 		return len(m.repos())
+	case kindPinned:
+		return len(m.pinned())
 	default:
 		return len(m.issues())
 	}
 }
 
-// kindHasSub reports whether a kind's table rows carry a second line in the given view.
-func (m Model) kindHasSub(kind int, overview bool) bool {
+// rowsFor builds the table rows a kind renders in the Command Center or on its dedicated tab.
+func (m Model) rowsFor(kind int, overview bool) [][]string {
 	switch {
+	case kind == kindPR && overview:
+		return m.ovPRRows(m.prs())
+	case kind == kindPR:
+		return m.prRows(m.prs())
+	case kind == kindRun && overview:
+		return m.ovRunRows(m.runs())
+	case kind == kindRun:
+		return m.runRows(m.runs())
+	case kind == kindRepo && overview:
+		return m.ovRepoRows(m.repos())
+	case kind == kindRepo:
+		return m.repoRows(m.repos())
 	case overview:
-		return true
-	case kind == kindIssue:
-		return false
+		return m.ovIssueRows(m.issues())
 	default:
-		return true
+		return m.issueRows(m.issues())
 	}
 }
 
 // activeKind is the data kind the cursor keys currently drive.
 func (m Model) activeKind() int {
-	if m.tab == tabOverview {
+	switch m.tab {
+	case tabOverview:
 		return m.focus
+	case tabProfile:
+		return kindPinned
 	}
-	return m.tab - 1
+	return m.tab - tabPRs
+}
+
+// cycleTab steps through the tabs with tab / shift+tab. The Command Center is skipped: there, tab
+// moves between its panels instead.
+func cycleTab(tab, delta int) int {
+	for {
+		tab = (tab + delta + len(tabNames)) % len(tabNames)
+		if tab != tabOverview {
+			return tab
+		}
+	}
 }
 
 func (m *Model) move(delta int) {
@@ -657,6 +872,8 @@ func (m *Model) clampCursors() {
 	m.cursor[kindRun] = clamp(m.cursor[kindRun], 0, len(m.runs())-1)
 	m.cursor[kindRepo] = clamp(m.cursor[kindRepo], 0, len(m.repos())-1)
 	m.cursor[kindIssue] = clamp(m.cursor[kindIssue], 0, len(m.issues())-1)
+	m.cursor[kindPinned] = clamp(m.cursor[kindPinned], 0, len(m.pinned())-1)
+	m.notifCursor = clamp(m.notifCursor, 0, len(m.data.Notifications)-1)
 }
 
 // pillFor returns the filter chip for a kind; chips only apply on dedicated tabs.
@@ -665,6 +882,11 @@ func (m Model) pillFor(kind int) int {
 		return 0
 	}
 	return m.pill[kind]
+}
+
+// needsReview reports whether a PR waits on a review: requested from the viewer or required by the repo.
+func needsReview(pr gh.PullRequest) bool {
+	return !pr.IsDraft && (pr.NeedsMyReview || pr.ReviewDecision == gh.ReviewRequired)
 }
 
 func (m Model) prs() []gh.PullRequest {
@@ -677,15 +899,15 @@ func (m Model) prs() []gh.PullRequest {
 		} else {
 			switch m.pill[kindPR] {
 			case 1:
-				if pr.IsDraft || pr.ReviewDecision == gh.ReviewApproved || pr.ReviewDecision == gh.ReviewChangesRequested {
+				if !needsReview(pr) || pr.ReviewDecision == gh.ReviewApproved {
 					continue
 				}
 			case 2:
-				if pr.ReviewDecision != gh.ReviewApproved {
+				if !pr.MergeReady() {
 					continue
 				}
 			case 3:
-				if pr.ReviewDecision != gh.ReviewChangesRequested {
+				if pr.ReviewDecision != gh.ReviewChangesRequested && pr.CIState != gh.StateFailure && !pr.Conflicting {
 					continue
 				}
 			}
@@ -719,7 +941,7 @@ func (m Model) repos() []gh.Repo {
 		if (pill == 1 && r.IsPrivate) || (pill == 2 && !r.IsPrivate) || (pill == 3 && r.Ahead == 0 && r.Behind == 0) {
 			continue
 		}
-		if fuzzy(m.filter, r.NameWithOwner+" "+r.Language+" "+r.LatestMessage+" "+r.SyncBranch) {
+		if fuzzy(m.filter, r.NameWithOwner+" "+r.Language+" "+r.LatestMessage+" "+r.SyncBranch+" "+r.Description) {
 			out = append(out, r)
 		}
 	}
@@ -777,309 +999,8 @@ func (m Model) selectedIssue() (gh.Issue, bool) {
 	return l[clamp(m.cursor[kindIssue], 0, len(l)-1)], true
 }
 
+// demo reports whether the model shows offline sample data, so actions are simulated.
 func (m Model) demo() bool { return m.client == nil || m.data == nil || m.data.Demo }
-
-// confirm arms a confirm-twice action; it returns true when this press is the confirmation.
-func (m *Model) confirm(key, id, prompt string) bool {
-	token := key + ":" + id
-	if m.pending == token {
-		m.pending = ""
-		return true
-	}
-	m.pending = token
-	m.setStatus(statusErr, prompt+" — press "+key+" again to confirm, any other key cancels")
-	return false
-}
-
-func (m Model) approve() (tea.Model, tea.Cmd) {
-	if m.activeKind() != kindPR {
-		m.setStatus(statusInfo, "ghx: focus a pull request to approve (tab / 2)")
-		return m, nil
-	}
-	pr, ok := m.selectedPR()
-	if !ok {
-		return m, nil
-	}
-	if pr.Author == m.data.User.Login {
-		m.notify(statusErr, fmt.Sprintf("can't approve your own PR #%d", pr.Number))
-		return m, nil
-	}
-	args := gh.ApproveArgs(pr.Repo, pr.Number)
-	if m.demo() {
-		m.mutatePR(pr, func(p *gh.PullRequest) {
-			p.ReviewDecision = gh.ReviewApproved
-			p.NeedsMyReview = false
-		})
-		m.notify(statusOK, fmt.Sprintf("Approved PR #%d (%s)", pr.Number, pr.Repo))
-		return m, nil
-	}
-	m.setStatus(statusInfo, "gh "+strings.Join(args, " "))
-	return m, ghCmd(fmt.Sprintf("Approved PR #%d (%s)", pr.Number, pr.Repo), args, true)
-}
-
-func (m Model) merge() (tea.Model, tea.Cmd) {
-	if m.activeKind() != kindPR {
-		m.setStatus(statusInfo, "ghx: focus a pull request to merge (tab / 2)")
-		return m, nil
-	}
-	pr, ok := m.selectedPR()
-	if !ok {
-		return m, nil
-	}
-	warn := ""
-	if !pr.MergeReady() {
-		warn = " (not merge-ready!)"
-	}
-	if !m.confirm("m", fmt.Sprintf("%s#%d", pr.Repo, pr.Number), fmt.Sprintf("squash-merge #%d%s", pr.Number, warn)) {
-		return m, nil
-	}
-	args := gh.MergeArgs(pr.Repo, pr.Number)
-	if m.demo() {
-		m.mutatePR(pr, func(p *gh.PullRequest) { p.Merged = true })
-		m.removeMerged()
-		m.notify(statusOK, fmt.Sprintf("Squashed & merged PR #%d into %s", pr.Number, pr.BaseRef))
-		return m, nil
-	}
-	m.setStatus(statusInfo, "gh "+strings.Join(args, " "))
-	return m, ghCmd(fmt.Sprintf("Squashed & merged PR #%d", pr.Number), args, true)
-}
-
-func (m Model) checkoutCloneComment() (tea.Model, tea.Cmd) {
-	switch m.activeKind() {
-	case kindPR:
-		pr, ok := m.selectedPR()
-		if !ok {
-			return m, nil
-		}
-		args := gh.CheckoutArgs(pr.Repo, pr.Number)
-		if m.demo() {
-			m.notify(statusOK, "demo · would run gh "+strings.Join(args, " "))
-			return m, nil
-		}
-		m.setStatus(statusInfo, "gh "+strings.Join(args, " "))
-		return m, ghCmd(fmt.Sprintf("Checked out PR #%d", pr.Number), args, false)
-	case kindRepo:
-		r, ok := m.selectedRepo()
-		if !ok {
-			return m, nil
-		}
-		cmd := gh.CloneCommand(r.NameWithOwner)
-		if err := gh.CopyToClipboard(cmd); err != nil {
-			m.notify(statusInfo, "run: "+cmd)
-		} else {
-			m.notify(statusOK, "Copied: "+cmd)
-		}
-	case kindIssue:
-		is, ok := m.selectedIssue()
-		if !ok {
-			return m, nil
-		}
-		args := gh.CommentIssueArgs(is.Repo, is.Number)
-		if m.demo() {
-			m.mutateIssue(is, func(i *gh.Issue) { i.Comments++ })
-			m.notify(statusOK, fmt.Sprintf("Added comment to #%d", is.Number))
-			return m, nil
-		}
-		return m, ghCmd(fmt.Sprintf("Opened comment composer for #%d", is.Number), args, false)
-	default:
-		m.setStatus(statusInfo, "ghx: c checks out PRs, copies repo clones and comments on issues")
-	}
-	return m, nil
-}
-
-func (m Model) rerunOrRefresh() (tea.Model, tea.Cmd) {
-	if m.tab == tabRepos && !m.demo() {
-		if r, ok := m.selectedRepo(); ok {
-			delete(m.analytics, r.NameWithOwner)
-			delete(m.analyticsErr, r.NameWithOwner)
-			m.setStatus(statusInfo, "ghx: reloading insights for "+r.NameWithOwner+"…")
-		}
-	}
-	if m.activeKind() == kindRun {
-		if run, ok := m.selectedRun(); ok && run.State() == gh.StateFailure {
-			args := gh.RerunArgs(run.Repo, run.ID)
-			if m.demo() {
-				for i := range m.data.Runs {
-					if m.data.Runs[i].ID == run.ID {
-						m.data.Runs[i].Status, m.data.Runs[i].Conclusion = "in_progress", ""
-						m.data.Runs[i].StartedAt = time.Now()
-					}
-				}
-				m.notify(statusOK, fmt.Sprintf("Re-running failed jobs for %s (#%d)", run.Name, run.ID))
-				return m, nil
-			}
-			m.setStatus(statusInfo, "gh "+strings.Join(args, " "))
-			return m, ghCmd(fmt.Sprintf("Re-run queued for %s (#%d)", run.Name, run.ID), args, true)
-		}
-	}
-	if m.client == nil {
-		m.data = gh.MockDashboard()
-		m.clampCursors()
-		m.notify(statusOK, "Fetched latest GitHub state (demo)")
-		return m, nil
-	}
-	if m.loading {
-		return m, nil
-	}
-	m.loading = true
-	m.setStatus(statusInfo, "gh api graphql // fetching latest GitHub state…")
-	return m, tea.Batch(fetchCmd(m.client, m.cfg.Org), tick(120*time.Millisecond))
-}
-
-func (m Model) dispatchWorkflow() (tea.Model, tea.Cmd) {
-	if m.activeKind() != kindRun {
-		m.setStatus(statusInfo, "ghx: w triggers workflow_dispatch from the Actions view (3)")
-		return m, nil
-	}
-	r, ok := m.selectedRun()
-	if !ok {
-		return m, nil
-	}
-	if !m.confirm("w", fmt.Sprint(r.ID), fmt.Sprintf("run workflow_dispatch for %s on %s", r.Name, r.Repo)) {
-		return m, nil
-	}
-	args := gh.WorkflowDispatchArgs(r.Repo, r.Name)
-	if m.demo() {
-		m.notify(statusOK, fmt.Sprintf("Dispatched %s on %s", r.Name, r.Repo))
-		return m, nil
-	}
-	return m, ghCmd(fmt.Sprintf("Dispatched %s on %s", r.Name, r.Repo), args, true)
-}
-
-func (m Model) closeIssue() (tea.Model, tea.Cmd) {
-	if m.activeKind() != kindIssue {
-		m.setStatus(statusInfo, "ghx: x closes the selected issue (5)")
-		return m, nil
-	}
-	is, ok := m.selectedIssue()
-	if !ok {
-		return m, nil
-	}
-	if !m.confirm("x", fmt.Sprintf("%s#%d", is.Repo, is.Number), fmt.Sprintf("close issue #%d", is.Number)) {
-		return m, nil
-	}
-	remove := func(mm *Model) {
-		var keep []gh.Issue
-		for _, i := range mm.data.Issues {
-			if !(i.Repo == is.Repo && i.Number == is.Number) {
-				keep = append(keep, i)
-			}
-		}
-		mm.data.Issues = keep
-		mm.clampCursors()
-	}
-	label := fmt.Sprintf("Closed issue #%d (%s)", is.Number, is.Repo)
-	if m.demo() {
-		remove(&m)
-		m.notify(statusOK, label)
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		return actionMsg{label: label, res: gh.RunGH(gh.CloseIssueArgs(is.Repo, is.Number)...), after: remove}
-	}
-}
-
-func (m Model) markAllRead() (tea.Model, tea.Cmd) {
-	clear := func(mm *Model) {
-		mm.data.Notifications = nil
-		mm.notifCursor = 0
-	}
-	if m.demo() {
-		clear(&m)
-		m.notify(statusOK, "Marked all notifications as read")
-		return m, nil
-	}
-	return m, func() tea.Msg {
-		return actionMsg{label: "Marked all notifications as read", res: gh.RunGH(gh.MarkNotificationsReadArgs()...), after: clear}
-	}
-}
-
-func (m Model) openInBrowser() (tea.Model, tea.Cmd) {
-	var args []string
-	if m.showNotifs && len(m.data.Notifications) > 0 {
-		n := m.data.Notifications[clamp(m.notifCursor, 0, len(m.data.Notifications)-1)]
-		args = []string{"browse", "--repo", n.Repo}
-	} else {
-		switch m.activeKind() {
-		case kindPR:
-			if pr, ok := m.selectedPR(); ok {
-				args = []string{"pr", "view", fmt.Sprint(pr.Number), "--repo", pr.Repo, "--web"}
-			}
-		case kindRun:
-			if r, ok := m.selectedRun(); ok {
-				args = []string{"run", "view", fmt.Sprint(r.ID), "--repo", r.Repo, "--web"}
-			}
-		case kindRepo:
-			if r, ok := m.selectedRepo(); ok {
-				args = []string{"browse", "--repo", r.NameWithOwner}
-			}
-		case kindIssue:
-			if is, ok := m.selectedIssue(); ok {
-				args = []string{"issue", "view", fmt.Sprint(is.Number), "--repo", is.Repo, "--web"}
-			}
-		}
-	}
-	if args == nil {
-		return m, nil
-	}
-	if m.demo() {
-		m.notify(statusOK, "demo · would run gh "+strings.Join(args, " "))
-		return m, nil
-	}
-	return m, ghCmd("Opened in browser", args, false)
-}
-
-func (m Model) bumpAlert(idx int) (tea.Model, tea.Cmd) {
-	if idx >= len(m.data.Alerts) {
-		m.setStatus(statusInfo, "ghx: no Dependabot alert in that slot")
-		return m, nil
-	}
-	a := m.data.Alerts[idx]
-	url := fmt.Sprintf("https://github.com/%s/security/dependabot", a.Repo)
-	if m.demo() {
-		m.notify(statusOK, fmt.Sprintf("Bump %s → %s (%s)", a.Package, a.PatchedVersion, a.CVE))
-		return m, nil
-	}
-	if err := gh.OpenURL(url); err != nil {
-		m.notify(statusErr, "open failed: "+err.Error())
-	} else {
-		m.notify(statusOK, fmt.Sprintf("Opened Dependabot for %s → bump %s to %s", a.Repo, a.Package, a.PatchedVersion))
-	}
-	return m, nil
-}
-
-func (m *Model) mutatePR(target gh.PullRequest, f func(*gh.PullRequest)) {
-	for _, list := range []*[]gh.PullRequest{&m.data.ReviewPRs, &m.data.MyPRs} {
-		for i := range *list {
-			if (*list)[i].Repo == target.Repo && (*list)[i].Number == target.Number {
-				f(&(*list)[i])
-			}
-		}
-	}
-}
-
-func (m *Model) mutateIssue(target gh.Issue, f func(*gh.Issue)) {
-	for i := range m.data.Issues {
-		if m.data.Issues[i].Repo == target.Repo && m.data.Issues[i].Number == target.Number {
-			f(&m.data.Issues[i])
-		}
-	}
-}
-
-func (m *Model) removeMerged() {
-	keep := func(in []gh.PullRequest) []gh.PullRequest {
-		var out []gh.PullRequest
-		for _, p := range in {
-			if !p.Merged {
-				out = append(out, p)
-			}
-		}
-		return out
-	}
-	m.data.ReviewPRs = keep(m.data.ReviewPRs)
-	m.data.MyPRs = keep(m.data.MyPRs)
-	m.clampCursors()
-}
 
 // fuzzy reports whether every whitespace-separated term of query is a subsequence of hay.
 func fuzzy(query, hay string) bool {
@@ -1088,13 +1009,14 @@ func fuzzy(query, hay string) bool {
 	}
 	hay = strings.ToLower(hay)
 	for _, term := range strings.Fields(strings.ToLower(query)) {
+		want := []rune(term)
 		i := 0
 		for _, r := range hay {
-			if i < len(term) && r == rune(term[i]) {
+			if i < len(want) && r == want[i] {
 				i++
 			}
 		}
-		if i < len(term) {
+		if i < len(want) {
 			return false
 		}
 	}
@@ -1108,7 +1030,6 @@ func firstLine(s string) string {
 	return s
 }
 
-// View renders the whole screen, painted with the theme background.
 // chromeLayout sizes the sticky KPI strip and the gap under it for a terminal of height h.
 func chromeLayout(h int) (kpiH, gap int) {
 	switch {
@@ -1130,6 +1051,7 @@ func (m Model) bodyTop() int {
 // bodyHeight is the number of rows available to the active view.
 func (m Model) bodyHeight() int { return m.height - m.bodyTop() - 1 }
 
+// View renders the whole screen, painted with the theme background.
 func (m Model) View() string {
 	w, h := m.width, m.height
 	if w == 0 || h == 0 {
@@ -1153,27 +1075,37 @@ func (m Model) View() string {
 	for i := range body {
 		body[i] = fit(strings.Repeat(" ", pageMargin)+body[i], w)
 	}
-	if m.showHelp {
+	dimmed := func() {
 		for i := range body {
 			body[i] = m.p.dim(ansi.Strip(body[i]))
 		}
-		box := m.helpModal()
-		bw := width(box[0])
-		body = overlay(body, box, max((w-bw)/2, 0), clamp((bodyH-len(box))/2, 0, bodyH), w)
 	}
-	if m.showNotifs {
+	switch {
+	case m.composeTo != nil:
+		dimmed()
+		box := m.composerModal(w, bodyH)
+		body = overlay(body, box, max((w-width(box[0]))/2, 0), clamp((bodyH-len(box))/2, 0, bodyH), w)
+	case m.showHelp:
+		dimmed()
+		box := m.helpModal(w, bodyH)
+		body = overlay(body, box, max((w-width(box[0]))/2, 0), clamp((bodyH-len(box))/2, 0, bodyH), w)
+	case m.showNotifs:
 		dw := drawerWidth(w)
 		body = overlay(body, m.notificationsDrawer(dw, bodyH), w-dw-1, 0, w)
 	}
-	if m.toast != "" && time.Since(m.toastAt) < toastTTL && !m.showHelp {
+	if m.toast != "" && time.Since(m.toastAt) < toastTTL && !m.showHelp && m.composeTo == nil {
 		color, icon := m.p.Green, m.p.ic.CheckPass
-		if m.toastKind == statusErr {
+		switch m.toastKind {
+		case statusErr:
 			color, icon = m.p.Red, "!"
+		case statusInfo:
+			color, icon = m.p.Blue, "i"
 		}
 		t := m.p.pill(color, icon+" "+m.toast)
-		if tw := width(t); tw < w-4 {
-			body = overlay(body, []string{t}, w-tw-2, bodyH-1, w)
+		if tw := width(t); tw > w-4 {
+			t = m.p.pill(color, fit(icon+" "+m.toast, w-6))
 		}
+		body = overlay(body, []string{t}, max(w-width(t)-2, 0), bodyH-1, w)
 	}
 
 	lines := make([]string, 0, h)
@@ -1205,6 +1137,8 @@ func (m Model) fullscreen(s string, w, h int) string {
 
 func (m Model) renderBody(w, h int) string {
 	switch m.tab {
+	case tabProfile:
+		return m.viewProfile(w, h)
 	case tabPRs:
 		return m.viewPRs(w, h)
 	case tabActions:
@@ -1218,22 +1152,39 @@ func (m Model) renderBody(w, h int) string {
 	}
 }
 
+var logo = []string{
+	" ██████╗ ██╗  ██╗██╗  ██╗",
+	"██╔════╝ ██║  ██║╚██╗██╔╝",
+	"██║  ███╗███████║ ╚███╔╝ ",
+	"██║   ██║██╔══██║ ██╔██╗ ",
+	"╚██████╔╝██║  ██║██╔╝ ██╗",
+	" ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝",
+}
+
+// splash is the startup screen while the first fetch runs, and the error screen if it fails.
 func (m Model) splash(w, h int) string {
-	logo := []string{
-		" ██████╗ ██╗  ██╗██╗  ██╗",
-		"██╔════╝ ██║  ██║╚██╗██╔╝",
-		"██║  ███╗███████║ ╚███╔╝ ",
-		"██║   ██║██╔══██║ ██╔██╗ ",
-		"╚██████╔╝██║  ██║██╔╝ ██╗",
-		" ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝",
-	}
-	colors := []string{m.p.Blue, m.p.Blue, m.p.Cyan, m.p.Cyan, m.p.Purple, m.p.Purple}
+	p := m.p
+	colors := []string{p.Blue, p.Blue, p.Cyan, p.Cyan, p.Purple, p.Purple}
 	var b strings.Builder
 	for i, l := range logo {
-		b.WriteString(m.p.bold(colors[i], l) + "\n")
+		b.WriteString(p.bold(colors[i], l) + "\n")
 	}
-	b.WriteString("\n" + m.p.muted("Your GitHub universe, in your terminal.") + "\n\n")
-	b.WriteString(m.p.fg(m.p.Yellow, m.spin()) + " " + m.p.text(m.status))
+	b.WriteString("\n" + p.muted("Your GitHub universe, in your terminal.") + "\n\n")
+	switch {
+	case m.fetchErr != "" && !m.loading:
+		msgW := clamp(w-8, 30, 72)
+		b.WriteString(p.bold(p.Red, p.ic.CheckFail+" Couldn't load your dashboard") + "\n")
+		for _, l := range wrap(sanitize(m.fetchErr), msgW, 3) {
+			b.WriteString(p.muted(l) + "\n")
+		}
+		b.WriteString("\n")
+		if !m.nextFetch.IsZero() {
+			b.WriteString(p.dim(fmt.Sprintf("retrying in %s", time.Until(m.nextFetch).Round(time.Second))) + "\n\n")
+		}
+		b.WriteString(p.kbd("r") + p.muted(" retry now   ") + p.kbd("d") + p.muted(" explore demo data   ") + p.kbd("q") + p.muted(" quit"))
+	default:
+		b.WriteString(p.fg(p.Yellow, m.spin()) + " " + p.text(strings.TrimPrefix(m.status, "ghx: ")))
+	}
 	return m.fullscreen(lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, b.String()), w, h)
 }
 
@@ -1251,57 +1202,88 @@ func hjoin(left, right string) string {
 func RenderCheck(cfg *config.Config, d *gh.Dashboard) (map[string]string, error) {
 	sizes := [][2]int{{80, 24}, {120, 36}, {160, 48}}
 	out := map[string]string{}
+	render := func(name string, sz [2]int, setup func(*Model)) error {
+		m := checkModel(cfg, nil, d)
+		m.width, m.height = sz[0], sz[1]
+		setup(&m)
+		frame, err := safeView(m)
+		if err != nil {
+			return fmt.Errorf("%s at %dx%d: %w", name, sz[0], sz[1], err)
+		}
+		out[fmt.Sprintf("%dx%d/%s", sz[0], sz[1], name)] = frame
+		return nil
+	}
 	for _, sz := range sizes {
 		for tab := range tabNames {
-			m := checkModel(cfg, d)
-			m.width, m.height = sz[0], sz[1]
-			m.tab = tab
-			frame, err := safeView(m)
-			if err != nil {
-				return out, fmt.Errorf("tab %d (%s) at %dx%d: %w", tab+1, tabNames[tab], sz[0], sz[1], err)
+			if err := render(fmt.Sprintf("%d-%s", tab+1, tabNames[tab]), sz, func(m *Model) { m.tab = tab }); err != nil {
+				return out, err
 			}
-			out[fmt.Sprintf("%dx%d/%d-%s", sz[0], sz[1], tab+1, tabNames[tab])] = frame
 		}
-		{
-			m := checkModel(cfg, d)
-			m.width, m.height = sz[0], sz[1]
-			m.tab, m.insights = tabRepos, true
-			frame, err := safeView(m)
-			if err != nil {
-				return out, fmt.Errorf("insights at %dx%d: %w", sz[0], sz[1], err)
-			}
-			out[fmt.Sprintf("%dx%d/4-insights", sz[0], sz[1])] = frame
+		steps := map[string]func(*Model){
+			"5-insights":      func(m *Model) { m.tab, m.insights = tabRepos, true },
+			"1-no-profile":    func(m *Model) { d := *m.data; d.Profile = nil; m.data = &d; m.tab = tabProfile },
+			"modal-inbox":     func(m *Model) { m.showNotifs = true },
+			"modal-help":      func(m *Model) { m.showHelp = true },
+			"modal-comment":   func(m *Model) { m.tab = tabIssues; mm, _ := m.startComment(); *m = mm.(Model) },
+			"inbox-scrolled":  func(m *Model) { m.showNotifs, m.notifCursor = true, len(m.data.Notifications)-1 },
+			"empty":           func(m *Model) { m.data = emptyDashboard(m.data) },
+			"1-empty-profile": func(m *Model) { m.data = emptyDashboard(m.data); m.tab = tabProfile },
 		}
-		for _, modal := range []string{"inbox", "help"} {
-			m := checkModel(cfg, d)
-			m.width, m.height = sz[0], sz[1]
-			m.showNotifs, m.showHelp = modal == "inbox", modal == "help"
-			frame, err := safeView(m)
-			if err != nil {
-				return out, fmt.Errorf("%s modal at %dx%d: %w", modal, sz[0], sz[1], err)
+		for name, setup := range steps {
+			if err := render(name, sz, setup); err != nil {
+				return out, err
 			}
-			out[fmt.Sprintf("%dx%d/modal-%s", sz[0], sz[1], modal)] = frame
 		}
 	}
 	return out, nil
 }
 
-// Snapshot renders a single frame for the given tab and size.
-func Snapshot(cfg *config.Config, d *gh.Dashboard, tab, w, h int, notifs, help bool) (string, error) {
-	m := checkModel(cfg, d)
+// emptyDashboard is a brand-new account: no PRs, runs, issues or notifications.
+func emptyDashboard(d *gh.Dashboard) *gh.Dashboard {
+	var prof *gh.Profile
+	if d.Profile != nil {
+		prof = &gh.Profile{Login: d.Profile.Login, Avatar: d.Profile.Avatar, CreatedAt: d.Profile.CreatedAt}
+	}
+	return &gh.Dashboard{User: d.User, Profile: prof, Repos: d.Repos[:1], Contributions: d.Contributions, FetchedAt: d.FetchedAt, Demo: d.Demo}
+}
+
+// Snapshot renders a single frame for the given tab and size. With a live client, the repository
+// views also load real insights for the first repository.
+func Snapshot(cfg *config.Config, client *gh.Client, d *gh.Dashboard, tab, w, h int, notifs, help bool) (string, error) {
+	m := checkModel(cfg, client, d)
 	m.width, m.height = w, h
-	if tab == len(tabNames) {
+	if tab == TabInsights {
 		tab, m.insights = tabRepos, true
 	}
 	m.tab = clamp(tab, 0, len(tabNames)-1)
 	m.showNotifs, m.showHelp = notifs, help
+	if m.tab == tabRepos && !m.demo() {
+		if r, ok := m.selectedRepo(); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			// GitHub computes statistics on first request (HTTP 202); give it a few tries.
+			for attempt := 0; attempt < 4; attempt++ {
+				a, err := client.FetchRepoAnalytics(ctx, r.NameWithOwner)
+				if err != nil {
+					m.analyticsErr[r.NameWithOwner] = err.Error()
+					break
+				}
+				m.analytics[r.NameWithOwner] = a
+				if !a.StatsPending {
+					break
+				}
+				time.Sleep(3 * time.Second)
+			}
+		}
+	}
 	return safeView(m)
 }
 
 // checkModel builds an offline model around pre-fetched data for --check / --snapshot.
-func checkModel(cfg *config.Config, d *gh.Dashboard) Model {
+func checkModel(cfg *config.Config, client *gh.Client, d *gh.Dashboard) Model {
 	m := New(cfg, nil, "")
-	m.data = d
+	m.client, m.data = client, d
+	m.status = ""
 	return m
 }
 

@@ -18,41 +18,29 @@ func versionBadge() string {
 	return "v" + Version
 }
 
-type headerItem struct {
-	s    string
-	prio int
-}
-
-// joinFitting joins items with sep, dropping the lowest-priority ones until the result fits w.
-func joinFitting(items []headerItem, sep string, w int) string {
-	for floor := 0; floor <= 10; floor++ {
-		var parts []string
-		for _, it := range items {
-			if it.prio >= floor && it.s != "" {
-				parts = append(parts, it.s)
-			}
-		}
-		out := strings.Join(parts, sep)
-		if width(out) <= w || len(parts) <= 1 {
-			return out
-		}
-	}
-	return ""
-}
-
-// header renders the top bar: brand, @user, context switcher, glyph/theme fields, inbox and keys buttons, clock.
+// header renders the top bar: brand, @user, scope, status badges, theme/glyph controls, inbox, keys and clock.
 func (m Model) header(w int) string {
 	p := m.p
 	brand := p.bold(p.TextPrimary, p.ic.Github+" ghx") + " " + p.badge(p.Blue, versionBadge())
-	user := p.fg(p.Green, "●") + " " + p.bold(p.TextPrimary, "@"+m.data.User.Login)
-	ctx := fmt.Sprintf("Context: All Repositories (%d)", len(m.data.Repos))
-	if m.cfg.Org != "" {
-		ctx = fmt.Sprintf("Org: %s (%d)", m.cfg.Org, len(m.data.Repos))
+	dot := p.Green
+	switch {
+	case m.loading:
+		dot = p.Yellow
+	case m.failures > 0:
+		dot = p.Red
 	}
-	context := p.field(p.muted(p.ic.RepoPublic) + " " + p.bold(p.Blue, ctx) + p.muted("  ⌄"))
-	demo := ""
-	if m.data.Demo {
-		demo = p.badge(p.Yellow, "DEMO")
+	user := p.fg(dot, "●") + " " + p.bold(p.TextPrimary, "@"+m.data.User.Login)
+	scope := plural(len(m.data.Repos), "recent repo")
+	if m.cfg.Org != "" {
+		scope = m.cfg.Org + " · " + plural(len(m.data.Repos), "repo")
+	}
+	context := p.field(p.muted(p.ic.RepoPublic) + " " + p.bold(p.Blue, scope))
+	status := ""
+	switch {
+	case m.data.Demo:
+		status = p.badge(p.Yellow, "DEMO")
+	case len(m.data.Warnings) > 0:
+		status = p.badge(p.Yellow, fmt.Sprintf("⚠ %d partial", len(m.data.Warnings)))
 	}
 
 	unread := len(m.data.Notifications)
@@ -60,7 +48,7 @@ func (m Model) header(w int) string {
 	if unread == 0 {
 		inboxColor = p.TextSecondary
 	}
-	glyphs := "Nerd Octicons"
+	glyphs := "Nerd"
 	if m.cfg.ASCII {
 		glyphs = "Unicode"
 	}
@@ -73,12 +61,12 @@ func (m Model) header(w int) string {
 		{" " + brand, 10, false},
 		{user, 9, false},
 		{context, 7, false},
-		{demo, 5, false},
-		{p.field(p.muted("FONT:") + " " + p.text(glyphs) + p.muted(" ⌄")), 2, true},
-		{p.field(p.muted("THEME:") + " " + p.fg(p.Cyan, p.Name) + p.muted(" ⌄")), 4, true},
+		{status, 6, false},
+		{p.field(p.muted("GLYPHS ") + p.text(glyphs)), 2, true},
+		{p.field(p.muted("THEME ") + p.fg(p.Cyan, p.Name)), 4, true},
 		{p.badge(inboxColor, fmt.Sprintf("%s %d Inbox", p.ic.Bell, unread)), 8, true},
 		{p.badge(p.TextSecondary, "? Keys"), 3, true},
-		{p.muted(time.Now().Format("15:04 MST")), 1, true},
+		{p.muted(time.Now().Format("15:04")), 1, true},
 	}
 	var left, right string
 	for floor := 0; floor <= 10; floor++ {
@@ -130,23 +118,39 @@ func (m Model) tabIcon(i int) string {
 		return p.fg(p.Blue, p.ic.RepoPublic)
 	case tabIssues:
 		return p.fg(p.Yellow, p.ic.IssueOpen)
+	case tabProfile:
+		return p.fg(p.Purple, p.ic.Person)
 	default:
 		return p.fg(p.Blue, p.ic.Pulse)
 	}
 }
 
 // tabSegment renders one tab button: key cap, icon, label and count badge.
-func (m Model) tabSegment(i int) string {
+func (m Model) tabSegment(i int) string { return m.tabSegmentMode(i, m.tabsCompact()) }
+
+// tabsCompact reports whether only the active tab shows its label, so the six tabs and the sync
+// badge fit a narrow terminal.
+func (m Model) tabsCompact() bool {
+	full := 0
+	for i := range tabNames {
+		full += width(m.tabSegmentMode(i, false)) + 1
+	}
+	return full+18 > m.width
+}
+
+func (m Model) tabSegmentMode(i int, compact bool) string {
 	p := m.p
 	name := tabNames[i]
 	if m.width < 190 {
 		name = shortTabNames[i]
 	}
-	label := p.muted(name)
+	label := " " + p.muted(name)
 	if i == m.tab {
-		label = lipgloss.NewStyle().Foreground(lipgloss.Color(p.TextPrimary)).Bold(true).Underline(true).Render(name)
+		label = " " + lipgloss.NewStyle().Foreground(lipgloss.Color(p.TextPrimary)).Bold(true).Underline(true).Render(name)
+	} else if compact {
+		label = ""
 	}
-	seg := " " + p.kbd(fmt.Sprint(i+1)) + " " + m.tabIcon(i) + " " + label
+	seg := " " + p.kbd(fmt.Sprint(i+1)) + " " + m.tabIcon(i) + label
 	if c := m.tabCount(i); c != "" {
 		seg += " " + c
 	}
@@ -178,11 +182,14 @@ func (m Model) tabBar(w int) string {
 	}
 	tabs := strings.Join(segs, p.line("│")) + p.line("│")
 
-	fetch := p.badge(p.Green, p.ic.Running+" Fetch")
-	if m.loading {
+	fetch := p.badge(p.TextSecondary, p.ic.Running+" Demo data")
+	switch {
+	case m.loading:
 		fetch = p.badge(p.Yellow, m.spin()+" Syncing")
-	} else if !m.data.Demo {
-		fetch = p.badge(p.Green, p.ic.Running+" Fetch · "+ago(m.data.FetchedAt))
+	case m.failures > 0:
+		fetch = p.badge(p.Red, p.ic.CheckFail+" Offline · "+ago(m.data.FetchedAt))
+	case !m.data.Demo:
+		fetch = p.badge(p.Green, p.ic.CheckPass+" Synced "+ago(m.data.FetchedAt))
 	}
 	room := w - width(tabs) - width(fetch) - 4
 	right := ""
@@ -196,7 +203,7 @@ func (m Model) tabBar(w int) string {
 		case m.filter != "":
 			content = p.fg(p.Yellow, p.ic.Search+" "+m.filter) + p.dim("  esc clears")
 		default:
-			content = p.muted(p.ic.Search) + " " + p.dim("Filter PRs, repos, branches, workflows, issues… (/)")
+			content = p.muted(p.ic.Search) + " " + p.dim("Press / to filter PRs, repos, branches, issues…")
 		}
 		right = paint(" "+fit(content, fw-2)+" ", p.BgPrimary, fw) + " " + fetch + " "
 	} else if room >= 0 {

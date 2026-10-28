@@ -1,9 +1,14 @@
 package github
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
+
+// WebURL is the github.com origin used to build links to PRs, issues, runs and repositories.
+const WebURL = "https://github.com"
 
 // CI rollup / check states shared by PRs, repos and runs.
 const (
@@ -13,17 +18,95 @@ const (
 	StateNone    = ""
 )
 
-// Review decisions as returned by the GraphQL API.
+// Review decisions as returned by the GraphQL API. An empty decision means the repository requires no review.
 const (
 	ReviewApproved         = "APPROVED"
 	ReviewChangesRequested = "CHANGES_REQUESTED"
 	ReviewRequired         = "REVIEW_REQUIRED"
 )
 
+// Merge methods, in the order ghx prefers them when a repository allows several.
+const (
+	MergeSquash = "squash"
+	MergeCommit = "merge"
+	MergeRebase = "rebase"
+)
+
 // User is the authenticated viewer.
 type User struct {
 	Login string
 	Name  string
+}
+
+// Profile is the viewer's public GitHub profile, as shown on github.com/<login>.
+type Profile struct {
+	Login, Name, Bio, Pronouns   string
+	Company, Location            string
+	Website, Twitter             string
+	StatusEmoji, StatusMessage   string // StatusEmoji is a GitHub shortcode such as ":house:"
+	AvatarURL                    string
+	Avatar                       *Pixels
+	CreatedAt                    time.Time
+	Followers, Following         int
+	Starred                      int // repositories the viewer starred
+	Repos                        int // repositories the viewer owns
+	StarsEarned, ForksEarned     int // across the viewer's own non-fork repositories
+	Orgs                         []string
+	Socials                      []Social
+	Pinned                       []PinnedRepo
+	Popular                      bool       // Pinned holds the most-starred repositories because none are pinned
+	Languages                    []LangStat // primary languages of the viewer's own repositories, by repository count
+	CommitRepos                  []RepoContribution
+	ReposCreated, PrivateContrib int    // contributions in the last year: repositories created, private contributions
+	Readme                       string // profile README (<login>/<login>) converted to plain text by CleanReadme
+}
+
+// URL is the profile page on github.com.
+func (p *Profile) URL() string { return ProfileURL(p.Login) }
+
+// ProfileURL is a user's page on github.com.
+func ProfileURL(login string) string { return WebURL + "/" + login }
+
+// Social is a linked social account (Mastodon, LinkedIn, …).
+type Social struct {
+	Provider string
+	Name     string
+	URL      string
+}
+
+// PinnedRepo is a repository pinned to the profile.
+type PinnedRepo struct {
+	NameWithOwner string
+	Description   string
+	Language      string
+	LanguageColor string
+	Stars, Forks  int
+	IsPrivate     bool
+	Parent        string // upstream repository when this is a fork
+}
+
+// URL is the repository's page on github.com.
+func (r PinnedRepo) URL() string { return WebURL + "/" + r.NameWithOwner }
+
+// RepoContribution counts the viewer's commits to one repository over the last year.
+type RepoContribution struct {
+	Repo    string
+	Commits int
+}
+
+// Pixels is a small RGB image (the avatar), stored row-major as 3 bytes per pixel.
+type Pixels struct {
+	W, H int
+	RGB  []byte
+}
+
+// At returns the color of pixel (x, y) as #rrggbb, and false outside the image.
+func (p *Pixels) At(x, y int) (string, bool) {
+	i := y*p.W + x
+	if x < 0 || y < 0 || x >= p.W || 3*i+2 >= len(p.RGB) {
+		return "", false
+	}
+	return fmt.Sprintf("#%02x%02x%02x", p.RGB[3*i], p.RGB[3*i+1], p.RGB[3*i+2]), true
 }
 
 // ChangedFile is one file in a pull request diff.
@@ -54,8 +137,11 @@ type PullRequest struct {
 	HeadRef        string
 	BaseRef        string
 	IsDraft        bool
+	CrossRepo      bool // head branch lives in a fork
 	Merged         bool
 	Mergeable      bool
+	Conflicting    bool   // GitHub reports merge conflicts (Mergeable is false while it is still computing, too)
+	MergeMethod    string // preferred merge method the repository allows; "" if unknown
 	ReviewDecision string
 	CIState        string
 	Additions      int
@@ -64,13 +150,52 @@ type PullRequest struct {
 	UpdatedAt      time.Time
 	NeedsMyReview  bool
 	Files          []ChangedFile
-	Checks         []CheckRun
+	Checks         []CheckRun // first few checks, failing ones first
 	Reviewers      []Reviewer
+	// Check counts across every check on the head commit (Checks may be truncated). Zero when unknown.
+	ChecksTotal, ChecksPassed, ChecksFailed, ChecksPending int
 }
 
-// MergeReady reports whether the PR is approved, green and mergeable.
+// CheckCounts returns passed, failed and total checks, preferring GitHub's aggregate counts.
+func (p PullRequest) CheckCounts() (passed, failed, total int) {
+	if p.ChecksTotal > 0 {
+		return p.ChecksPassed, p.ChecksFailed, p.ChecksTotal
+	}
+	for _, c := range p.Checks {
+		switch c.State {
+		case StateSuccess:
+			passed++
+		case StateFailure:
+			failed++
+		}
+	}
+	return passed, failed, len(p.Checks)
+}
+
+// MergeReady reports whether the PR can be merged now: not a draft, no conflicts, no outstanding
+// required review, and CI green (or no CI at all).
 func (p PullRequest) MergeReady() bool {
-	return !p.IsDraft && p.Mergeable && p.ReviewDecision == ReviewApproved && p.CIState == StateSuccess
+	reviewOK := p.ReviewDecision == ReviewApproved || p.ReviewDecision == ""
+	ciOK := p.CIState == StateSuccess || p.CIState == StateNone
+	return !p.IsDraft && !p.Merged && p.Mergeable && reviewOK && ciOK
+}
+
+// Key identifies a PR across repositories.
+func (p PullRequest) Key() string { return fmt.Sprintf("%s#%d", p.Repo, p.Number) }
+
+// URL is the PR's page on github.com.
+func (p PullRequest) URL() string { return fmt.Sprintf("%s/%s/pull/%d", WebURL, p.Repo, p.Number) }
+
+// MergeLabel names the merge button for the PR's merge method.
+func (p PullRequest) MergeLabel() string {
+	switch p.MergeMethod {
+	case MergeCommit:
+		return "Merge"
+	case MergeRebase:
+		return "Rebase & Merge"
+	default:
+		return "Squash & Merge"
+	}
 }
 
 // Step is one step of a workflow job.
@@ -94,18 +219,22 @@ type Job struct {
 
 // WorkflowRun is a GitHub Actions run.
 type WorkflowRun struct {
-	ID         int64
-	Name       string
-	Repo       string
-	Branch     string
-	Event      string
-	SHA        string
-	Status     string
-	Conclusion string
-	StartedAt  time.Time
-	Duration   time.Duration
-	Jobs       []Job
-	FailureLog []string
+	ID           int64
+	WorkflowID   int64
+	WorkflowPath string // e.g. .github/workflows/ci.yml
+	HTMLURL      string
+	Attempt      int
+	Name         string
+	Repo         string
+	Branch       string
+	Event        string
+	SHA          string
+	Status       string
+	Conclusion   string
+	StartedAt    time.Time
+	Duration     time.Duration
+	Jobs         []Job
+	FailureLog   []string
 }
 
 // State collapses status/conclusion into SUCCESS, FAILURE or PENDING.
@@ -129,10 +258,19 @@ type Commit struct {
 	Date    time.Time
 }
 
+// URL is the run's page on github.com.
+func (r WorkflowRun) URL() string {
+	if r.HTMLURL != "" {
+		return r.HTMLURL
+	}
+	return fmt.Sprintf("%s/%s/actions/runs/%d", WebURL, r.Repo, r.ID)
+}
+
 // Repo is an active repository with branch sync and CI status.
 type Repo struct {
 	NameWithOwner string
 	IsPrivate     bool
+	IsArchived    bool
 	Description   string
 	Stars         int
 	Forks         int
@@ -154,6 +292,17 @@ type Repo struct {
 	Cadence       []int
 }
 
+// URL is the repository's page on github.com.
+func (r Repo) URL() string { return WebURL + "/" + r.NameWithOwner }
+
+// Name is the repository name without its owner.
+func (r Repo) Name() string {
+	if _, name, ok := strings.Cut(r.NameWithOwner, "/"); ok {
+		return name
+	}
+	return r.NameWithOwner
+}
+
 // Label is an issue label.
 type Label struct {
 	Name  string
@@ -165,6 +314,7 @@ type Issue struct {
 	Number       int
 	Title        string
 	Repo         string
+	Author       string
 	Labels       []Label
 	Priority     string
 	LinkedPR     int
@@ -176,6 +326,9 @@ type Issue struct {
 	MilestonePct float64
 }
 
+// URL is the issue's page on github.com.
+func (i Issue) URL() string { return fmt.Sprintf("%s/%s/issues/%d", WebURL, i.Repo, i.Number) }
+
 // Notification is an unread inbox item.
 type Notification struct {
 	ID        string
@@ -183,6 +336,7 @@ type Notification struct {
 	Title     string
 	Type      string
 	Repo      string
+	URL       string // github.com page for the thread's subject
 	UpdatedAt time.Time
 }
 
@@ -272,6 +426,7 @@ type DependabotAlert struct {
 	Severity       string
 	CurrentVersion string
 	PatchedVersion string
+	URL            string
 }
 
 // CIDay aggregates workflow runs for one calendar day.
@@ -293,6 +448,7 @@ type ContributionBreakdown struct {
 // Dashboard is the full dataset rendered by the UI.
 type Dashboard struct {
 	User          User
+	Profile       *Profile // nil while unavailable (e.g. a cache written by an older ghx)
 	Breakdown     ContributionBreakdown
 	ReviewPRs     []PullRequest
 	MyPRs         []PullRequest
@@ -306,6 +462,8 @@ type Dashboard struct {
 	CIHistory     []CIDay
 	FetchedAt     time.Time
 	Demo          bool
+	// Warnings lists dashboard sections that failed to load; the rest of the data is still valid.
+	Warnings []string
 }
 
 // ActionPRs returns review-queue PRs followed by the viewer's own PRs.

@@ -58,7 +58,7 @@ func versionString() string {
 	return out
 }
 
-const usage = `ghx — an action-first GitHub dashboard for your terminal
+var usage = `ghx — an action-first GitHub dashboard for your terminal
 
 Usage:
   ghx [flags]
@@ -67,12 +67,13 @@ Examples:
   ghx                      live dashboard (uses ` + "`gh auth token`" + ` or $GITHUB_TOKEN)
   ghx --demo               offline demo with sample data
   ghx --org my-company     scope PRs, issues and repos to one organization
-  ghx --theme tokyo-night  github-dark | tokyo-night | catppuccin-mocha | dracula
+  ghx --theme tokyo-night  ` + themeList + `
 
 Environment:
   GITHUB_TOKEN / GH_TOKEN  token to use instead of the gh CLI
-  GHX_THEME                default theme
+  GHX_THEME                default theme (the last theme picked with t is remembered)
   GHX_NERD=1 / GHX_ASCII=1 force Nerd Font Octicons / plain Unicode glyphs
+  GHX_CONFIG_DIR           where settings are saved (default: your OS config dir)
 
 Press ? inside ghx for all keyboard shortcuts.
 
@@ -86,13 +87,14 @@ func main() {
 	}
 	demo := flag.Bool("demo", false, "run with the offline demo dataset")
 	org := flag.String("org", "", "scope PRs, issues and repos to a GitHub org")
-	theme := flag.String("theme", "", "github-dark | tokyo-night | catppuccin-mocha | dracula")
+	theme := flag.String("theme", "", themeList)
 	ascii := flag.Bool("ascii", false, "use Unicode glyphs instead of Nerd Font Octicons (or GHX_ASCII=1)")
 	check := flag.Bool("check", false, "render every tab at 80x24, 120x36 and 160x48, verify, and exit")
 	snapshot := flag.Bool("snapshot", false, "print a single rendered frame and exit (see --tab, --size)")
-	tab := flag.Int("tab", 1, "tab to render with --snapshot (1-5, or 6 for repository insights)")
+	tab := flag.Int("tab", 1, fmt.Sprintf("tab to render with --snapshot (1-%d, or %d for repository insights)", ui.TabCount(), ui.TabInsights+1))
 	size := flag.String("size", "120x36", "terminal size for --snapshot, WxH")
 	modals := flag.Bool("modals", false, "with --snapshot, also show the inbox drawer and help modal")
+	refresh := flag.Duration("refresh", config.DefaultRefresh, "background refresh interval (min 30s)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -101,8 +103,14 @@ func main() {
 		return
 	}
 
+	if *theme != "" && !validTheme(*theme) {
+		fmt.Fprintf(os.Stderr, "ghx: unknown theme %q (choose %s)\n", *theme, themeList)
+		os.Exit(2)
+	}
 	ui.Version, _ = resolveVersion()
-	cfg := config.New(*theme, *org, *demo, *ascii, *check)
+	gh.UserAgent = "ghx/" + strings.TrimPrefix(ui.Version, "v")
+	cfg := config.New(*theme, *org, *demo, *ascii, *check || *snapshot)
+	cfg.Refresh = max(*refresh, 30*time.Second)
 
 	var client *gh.Client
 	note := ""
@@ -120,7 +128,10 @@ func main() {
 		lipgloss.SetColorProfile(termenv.TrueColor)
 		data := loadOnce(client, cfg.Org)
 		if *snapshot {
-			os.Exit(runSnapshot(cfg, data, *tab, *size, *modals))
+			if data.Demo {
+				client = nil
+			}
+			os.Exit(runSnapshot(cfg, client, data, *tab, *size, *modals))
 		}
 		os.Exit(runCheck(cfg, data))
 	}
@@ -132,29 +143,44 @@ func main() {
 	}
 }
 
+var themeList = strings.Join(config.Names(), " | ")
+
+func validTheme(name string) bool {
+	want := config.Slug(name)
+	for _, n := range config.Names() {
+		if strings.HasPrefix(n, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // loadOnce fetches live data synchronously, falling back to the demo dataset.
 func loadOnce(client *gh.Client, org string) *gh.Dashboard {
 	if client == nil {
 		return gh.MockDashboard()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	d, err := client.Fetch(ctx, org)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ghx: live fetch failed, using demo data:", err)
 		return gh.MockDashboard()
 	}
+	for _, w := range d.Warnings {
+		fmt.Fprintln(os.Stderr, "ghx: warning:", w)
+	}
 	_ = gh.SaveCache(d, org)
 	return d
 }
 
-func runSnapshot(cfg *config.Config, d *gh.Dashboard, tab int, size string, modals bool) int {
+func runSnapshot(cfg *config.Config, client *gh.Client, d *gh.Dashboard, tab int, size string, modals bool) int {
 	var w, h int
 	if _, err := fmt.Sscanf(size, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
 		fmt.Fprintln(os.Stderr, "ghx: --size must look like 120x36")
 		return 2
 	}
-	frame, err := ui.Snapshot(cfg, d, tab-1, w, h, modals, modals)
+	frame, err := ui.Snapshot(cfg, client, d, tab-1, w, h, modals, modals)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ghx:", err)
 		return 1
@@ -177,7 +203,7 @@ func runCheck(cfg *config.Config, d *gh.Dashboard) int {
 	failed := 0
 	for _, k := range keys {
 		var w, h int
-		fmt.Sscanf(k, "%dx%d", &w, &h)
+		_, _ = fmt.Sscanf(k, "%dx%d", &w, &h)
 		lines := strings.Split(frames[k], "\n")
 		problem := ""
 		switch {

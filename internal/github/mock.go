@@ -23,7 +23,7 @@ func MockDashboard() *Dashboard {
 	d.ReviewPRs = []PullRequest{
 		{
 			Number: 1842, Title: "feat(scheduler): lock-free work-stealing run queue", Repo: "acme/orbit-engine",
-			Author: "kdubois", HeadRef: "feat/work-stealing", BaseRef: "main", Mergeable: true,
+			Author: "kdubois", HeadRef: "feat/work-stealing", BaseRef: "main", Mergeable: true, MergeMethod: MergeSquash,
 			ReviewDecision: ReviewRequired, CIState: StateSuccess, Additions: 612, Deletions: 148, ChangedFiles: 9,
 			UpdatedAt: ago(25 * time.Minute), NeedsMyReview: true,
 			Files: []ChangedFile{
@@ -39,7 +39,7 @@ func MockDashboard() *Dashboard {
 		},
 		{
 			Number: 977, Title: "fix(auth): refresh OIDC token before expiry window", Repo: "acme/web-console",
-			Author: "priya-r", HeadRef: "fix/oidc-refresh", BaseRef: "main", Mergeable: true,
+			Author: "priya-r", HeadRef: "fix/oidc-refresh", BaseRef: "main", Mergeable: true, MergeMethod: MergeSquash,
 			ReviewDecision: ReviewRequired, CIState: StatePending, Additions: 88, Deletions: 31, ChangedFiles: 4,
 			UpdatedAt: ago(2 * h), NeedsMyReview: true,
 			Files: []ChangedFile{
@@ -52,7 +52,7 @@ func MockDashboard() *Dashboard {
 		},
 		{
 			Number: 311, Title: "chore(deps): bump golang.org/x/net to v0.33.0", Repo: "octocat/ghx",
-			Author: "dependabot[bot]", HeadRef: "dependabot/go_modules/x-net", BaseRef: "main", Mergeable: true,
+			Author: "dependabot[bot]", HeadRef: "dependabot/go_modules/x-net", BaseRef: "main", Mergeable: true, MergeMethod: MergeSquash,
 			ReviewDecision: ReviewRequired, CIState: StateFailure, Additions: 6, Deletions: 6, ChangedFiles: 2,
 			UpdatedAt: ago(5 * h), NeedsMyReview: true,
 			Files:     []ChangedFile{{"go.mod", 2, 2}, {"go.sum", 4, 4}},
@@ -64,7 +64,7 @@ func MockDashboard() *Dashboard {
 	d.MyPRs = []PullRequest{
 		{
 			Number: 1838, Title: "perf(ingest): zero-copy protobuf decode path", Repo: "acme/orbit-engine",
-			Author: "octocat", HeadRef: "perf/zero-copy", BaseRef: "main", Mergeable: true,
+			Author: "octocat", HeadRef: "perf/zero-copy", BaseRef: "main", Mergeable: true, MergeMethod: MergeSquash,
 			ReviewDecision: ReviewApproved, CIState: StateSuccess, Additions: 341, Deletions: 207, ChangedFiles: 11,
 			UpdatedAt: ago(48 * time.Minute),
 			Files: []ChangedFile{
@@ -76,7 +76,7 @@ func MockDashboard() *Dashboard {
 		},
 		{
 			Number: 305, Title: "feat(ui): half-block contribution heatmap", Repo: "octocat/ghx",
-			Author: "octocat", HeadRef: "feat/heatmap", BaseRef: "main", Mergeable: true,
+			Author: "octocat", HeadRef: "feat/heatmap", BaseRef: "main", Mergeable: true, MergeMethod: MergeSquash,
 			ReviewDecision: ReviewApproved, CIState: StateSuccess, Additions: 164, Deletions: 22, ChangedFiles: 3,
 			UpdatedAt: ago(3 * h),
 			Files:     []ChangedFile{{"internal/ui/charts.go", 131, 8}, {"internal/ui/tab_overview.go", 29, 12}, {"README.md", 4, 2}},
@@ -85,7 +85,7 @@ func MockDashboard() *Dashboard {
 		},
 		{
 			Number: 982, Title: "refactor(api): migrate billing client to fetch + zod", Repo: "acme/web-console",
-			Author: "octocat", HeadRef: "refactor/billing-fetch", BaseRef: "main", Mergeable: false,
+			Author: "octocat", HeadRef: "refactor/billing-fetch", BaseRef: "main", Mergeable: false, MergeMethod: MergeSquash,
 			ReviewDecision: ReviewChangesRequested, CIState: StateSuccess, Additions: 503, Deletions: 690, ChangedFiles: 17,
 			UpdatedAt: ago(26 * h),
 			Files: []ChangedFile{
@@ -97,7 +97,7 @@ func MockDashboard() *Dashboard {
 		},
 		{
 			Number: 64, Title: "docs: architecture decision record for event bus", Repo: "acme/platform-rfcs",
-			Author: "octocat", HeadRef: "adr/event-bus", BaseRef: "main", IsDraft: true, Mergeable: true,
+			Author: "octocat", HeadRef: "adr/event-bus", BaseRef: "main", IsDraft: true, Mergeable: true, MergeMethod: MergeCommit,
 			ReviewDecision: ReviewRequired, CIState: StateNone, Additions: 212, Deletions: 0, ChangedFiles: 1,
 			UpdatedAt: ago(3 * day),
 			Files:     []ChangedFile{{"adr/0042-event-bus.md", 212, 0}},
@@ -116,7 +116,7 @@ func MockDashboard() *Dashboard {
 	}
 	d.Runs = []WorkflowRun{
 		{
-			ID: 9918273641, Name: "CI", Repo: "octocat/ghx", Branch: "dependabot/go_modules/x-net", Event: "pull_request",
+			ID: 9918273641, WorkflowID: 101, WorkflowPath: ".github/workflows/ci.yml", Name: "CI", Repo: "octocat/ghx", Branch: "dependabot/go_modules/x-net", Event: "pull_request",
 			SHA: "4be1f0c", Status: "completed", Conclusion: "failure", StartedAt: ago(5 * h), Duration: 3*time.Minute + 12*time.Second,
 			FailureLog: failLog,
 			Jobs: []Job{
@@ -136,7 +136,7 @@ func MockDashboard() *Dashboard {
 			},
 		},
 		{
-			ID: 9918270012, Name: "e2e", Repo: "acme/web-console", Branch: "fix/oidc-refresh", Event: "pull_request",
+			ID: 9918270012, WorkflowID: 202, WorkflowPath: ".github/workflows/e2e.yml", Name: "e2e", Repo: "acme/web-console", Branch: "fix/oidc-refresh", Event: "pull_request",
 			SHA: "a91c3d2", Status: "in_progress", StartedAt: ago(6 * time.Minute), Duration: 6*time.Minute + 4*time.Second,
 			Jobs: []Job{
 				{ID: 3, Name: "playwright (chromium)", Status: "in_progress", Steps: []Step{
@@ -153,7 +153,7 @@ func MockDashboard() *Dashboard {
 			},
 		},
 		{
-			ID: 9918265520, Name: "Release", Repo: "acme/orbit-engine", Branch: "main", Event: "push",
+			ID: 9918265520, WorkflowID: 303, WorkflowPath: ".github/workflows/release.yml", Name: "Release", Repo: "acme/orbit-engine", Branch: "main", Event: "push",
 			SHA: "e03b7a9", Status: "completed", Conclusion: "success", StartedAt: ago(70 * time.Minute), Duration: 8*time.Minute + 51*time.Second,
 			Jobs: []Job{
 				{ID: 4, Name: "publish crates", Status: "completed", Conclusion: "success", Steps: []Step{
@@ -165,7 +165,7 @@ func MockDashboard() *Dashboard {
 			},
 		},
 		{
-			ID: 9918260007, Name: "CI", Repo: "acme/orbit-engine", Branch: "feat/work-stealing", Event: "pull_request",
+			ID: 9918260007, WorkflowID: 304, WorkflowPath: ".github/workflows/ci.yml", Name: "CI", Repo: "acme/orbit-engine", Branch: "feat/work-stealing", Event: "pull_request",
 			SHA: "77d10fe", Status: "completed", Conclusion: "success", StartedAt: ago(30 * time.Minute), Duration: 11*time.Minute + 3*time.Second,
 			Jobs: []Job{
 				{ID: 5, Name: "test matrix", Status: "completed", Conclusion: "success", Steps: []Step{
@@ -176,7 +176,7 @@ func MockDashboard() *Dashboard {
 			},
 		},
 		{
-			ID: 9918251199, Name: "Deploy preview", Repo: "acme/web-console", Branch: "refactor/billing-fetch", Event: "pull_request",
+			ID: 9918251199, WorkflowID: 205, WorkflowPath: ".github/workflows/preview.yml", Name: "Deploy preview", Repo: "acme/web-console", Branch: "refactor/billing-fetch", Event: "pull_request",
 			SHA: "c4f8e21", Status: "completed", Conclusion: "success", StartedAt: ago(26 * h), Duration: 2*time.Minute + 37*time.Second,
 			Jobs: []Job{
 				{ID: 6, Name: "vercel deploy", Status: "completed", Conclusion: "success", Steps: []Step{
@@ -303,12 +303,17 @@ func MockDashboard() *Dashboard {
 		},
 	}
 
+	note := func(id, reason, title, typ, repo, url string, at time.Time) Notification {
+		return Notification{ID: id, Reason: reason, Title: title, Type: typ, Repo: repo, URL: WebURL + "/" + repo + url, UpdatedAt: at}
+	}
 	d.Notifications = []Notification{
-		{"n1", "review_requested", "feat(scheduler): lock-free work-stealing run queue", "PullRequest", "acme/orbit-engine", ago(25 * time.Minute)},
-		{"n2", "ci_activity", "CI workflow run failed for dependabot/go_modules/x-net", "CheckSuite", "octocat/ghx", ago(5 * h)},
-		{"n3", "mention", "@octocat can you confirm the backpressure repro?", "Issue", "acme/orbit-engine", ago(1 * h)},
-		{"n4", "assign", "SSO users logged out every 60 minutes", "Issue", "acme/web-console", ago(3 * day)},
-		{"n5", "security_alert", "Critical: golang.org/x/net HTTP/2 rapid reset", "RepositoryVulnerabilityAlert", "octocat/ghx", ago(6 * h)},
+		note("n1", "review_requested", "feat(scheduler): lock-free work-stealing run queue", "PullRequest", "acme/orbit-engine", "/pull/1842", ago(25*time.Minute)),
+		note("n3", "mention", "@octocat can you confirm the backpressure repro?", "Issue", "acme/orbit-engine", "/issues/1851", ago(1*h)),
+		note("n2", "ci_activity", "CI workflow run failed for dependabot/go_modules/x-net", "CheckSuite", "octocat/ghx", "/actions", ago(5*h)),
+		note("n5", "security_alert", "Critical: golang.org/x/net HTTP/2 rapid reset", "RepositoryVulnerabilityAlert", "octocat/ghx", "/security/dependabot", ago(6*h)),
+		note("n6", "comment", "fix(auth): refresh OIDC token before expiry window", "PullRequest", "acme/web-console", "/pull/977", ago(8*h)),
+		note("n7", "subscribed", "v2.14.0", "Release", "acme/orbit-engine", "/releases", ago(20*h)),
+		note("n4", "assign", "SSO users logged out every 60 minutes", "Issue", "acme/web-console", "/issues/990", ago(3*day)),
 	}
 
 	d.Languages = []LangStat{
@@ -316,8 +321,8 @@ func MockDashboard() *Dashboard {
 	}
 
 	d.Alerts = []DependabotAlert{
-		{Repo: "octocat/ghx", Package: "golang.org/x/net", Ecosystem: "go", CVE: "CVE-2023-44487", Severity: "critical", CurrentVersion: "0.17.0", PatchedVersion: "0.33.0"},
-		{Repo: "acme/web-console", Package: "next", Ecosystem: "npm", CVE: "CVE-2025-29927", Severity: "high", CurrentVersion: "14.2.3", PatchedVersion: "14.2.25"},
+		{Repo: "octocat/ghx", Package: "golang.org/x/net", Ecosystem: "go", CVE: "CVE-2023-44487", Severity: "critical", CurrentVersion: "0.17.0", PatchedVersion: "0.33.0", URL: WebURL + "/octocat/ghx/security/dependabot/3"},
+		{Repo: "acme/web-console", Package: "next", Ecosystem: "npm", CVE: "CVE-2025-29927", Severity: "high", CurrentVersion: "14.2.3", PatchedVersion: "14.2.25", URL: WebURL + "/acme/web-console/security/dependabot/12"},
 	}
 
 	r := rand.New(rand.NewSource(42))
@@ -359,5 +364,49 @@ func MockDashboard() *Dashboard {
 			P50:    time.Duration(p50s[i]) * time.Second,
 		})
 	}
+	d.Profile = mockProfile()
 	return d
+}
+
+func mockProfile() *Profile {
+	return &Profile{
+		Login: "octocat", Name: "Mona Lisa Octocat", Pronouns: "she/her",
+		Bio:     "Building developer tools that stay out of your way. Schedulers, CI pipelines and terminal UIs.",
+		Company: "@acme", Location: "San Francisco, CA", Website: "https://octocat.dev", Twitter: "octocat",
+		StatusEmoji: ":rocket:", StatusMessage: "Shipping orbit-engine v2",
+		Avatar:    Identicon("octocat", 32),
+		CreatedAt: time.Date(2011, 1, 25, 18, 44, 36, 0, time.UTC),
+		Followers: 12483, Following: 9, Starred: 1204, Repos: 64, StarsEarned: 48211, ForksEarned: 5122,
+		Orgs:    []string{"acme", "orbit-labs", "open-tooling"},
+		Socials: []Social{{Provider: "MASTODON", Name: "@octocat@hachyderm.io", URL: "https://hachyderm.io/@octocat"}},
+		Pinned: []PinnedRepo{
+			{NameWithOwner: "acme/orbit-engine", Description: "High-throughput event ingestion engine written in Rust", Language: "Rust", LanguageColor: "#dea584", Stars: 18234, Forks: 1311},
+			{NameWithOwner: "octocat/ghx", Description: "Action-first GitHub dashboard for your terminal", Language: "Go", LanguageColor: "#00ADD8", Stars: 9876, Forks: 402},
+			{NameWithOwner: "octocat/terminal-charts", Description: "Sparklines, heatmaps and bar charts for Bubble Tea apps", Language: "Go", LanguageColor: "#00ADD8", Stars: 4120, Forks: 233},
+			{NameWithOwner: "acme/platform-rfcs", Description: "Design docs and ADRs for the platform team", Language: "Markdown", LanguageColor: "#083fa1", Stars: 812, Forks: 97},
+			{NameWithOwner: "octocat/linguist-lite", Description: "Fast language detection for monorepos", Language: "Ruby", LanguageColor: "#701516", Stars: 655, Forks: 41, Parent: "acme/linguist"},
+			{NameWithOwner: "octocat/dotfiles", Description: "zsh, neovim and tmux config", Language: "Shell", LanguageColor: "#89e051", Stars: 1530, Forks: 388},
+		},
+		Languages: []LangStat{
+			{Name: "Go", Color: "#00ADD8", Percent: 34}, {Name: "Rust", Color: "#dea584", Percent: 22},
+			{Name: "TypeScript", Color: "#3178c6", Percent: 18}, {Name: "Shell", Color: "#89e051", Percent: 9},
+			{Name: "Other", Color: "#8b949e", Percent: 17},
+		},
+		CommitRepos: []RepoContribution{
+			{Repo: "acme/orbit-engine", Commits: 1203}, {Repo: "octocat/ghx", Commits: 642}, {Repo: "acme/web-console", Commits: 388},
+			{Repo: "octocat/dotfiles", Commits: 211}, {Repo: "acme/terraform-infra", Commits: 97},
+		},
+		ReposCreated: 14, PrivateContrib: 318,
+		Readme: CleanReadme(`### Hi, I'm Mona 👋
+
+I build developer tools: **orbit-engine**, a work-stealing event runtime, and [ghx](https://github.com/octocat/ghx), the GitHub dashboard you are looking at.
+
+#### Currently
+- 🔭 Working on orbit-engine v2 — lock-free run queues
+- 🌱 Learning Zig and formal verification with TLA+
+- 💬 Ask me about schedulers, CI pipelines and terminal UIs
+- ⚡ Fun fact: my first commit was a typo fix
+
+<p align="center"><img src="https://github-readme-stats.vercel.app/api?username=octocat" /></p>`),
+	}
 }

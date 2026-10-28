@@ -121,7 +121,8 @@ func (p palette) prIcon(pr gh.PullRequest) string {
 	}
 }
 
-// reviewBadge mirrors the design's Approved / Changes Req / Review Req chips.
+// reviewBadge mirrors the design's Approved / Changes Req / Review Req chips. A PR in a repository
+// without a review policy, where nobody was asked to review, shows "none" like CI without checks.
 func (p palette) reviewBadge(pr gh.PullRequest) string {
 	switch {
 	case pr.IsDraft:
@@ -130,19 +131,31 @@ func (p palette) reviewBadge(pr gh.PullRequest) string {
 		return p.badge(p.Green, p.ic.CheckPass+" Approved")
 	case pr.ReviewDecision == gh.ReviewChangesRequested:
 		return p.badge(p.Red, p.ic.CheckFail+" Changes Req")
-	default:
+	case pr.ReviewDecision == gh.ReviewRequired || pr.NeedsMyReview:
 		return p.badge(p.Yellow, p.ic.Clock+" Review Req")
 	}
+	for _, r := range pr.Reviewers {
+		if r.State == "APPROVED" {
+			return p.badge(p.Green, p.ic.CheckPass+" Approved")
+		}
+	}
+	return p.badge(p.TextSecondary, p.ic.Pending+" none")
 }
 
 func (p palette) mergeableBadge(pr gh.PullRequest) string {
 	switch {
 	case pr.IsDraft:
 		return p.badge(p.TextSecondary, "Draft")
-	case pr.Mergeable && pr.ReviewDecision != gh.ReviewChangesRequested:
-		return p.badge(p.Green, "Mergeable")
-	default:
+	case pr.Conflicting:
+		return p.badge(p.Red, "Conflicts")
+	case pr.ReviewDecision == gh.ReviewChangesRequested || pr.CIState == gh.StateFailure:
 		return p.badge(p.Red, "Blocked")
+	case pr.MergeReady():
+		return p.badge(p.Green, "Ready")
+	case !pr.Mergeable:
+		return p.badge(p.TextSecondary, "Checking")
+	default:
+		return p.badge(p.Yellow, "Waiting")
 	}
 }
 
@@ -150,55 +163,44 @@ func (p palette) diff(add, del int) string {
 	return p.fg(p.Green, fmt.Sprintf("+%d", add)) + p.dim(" / ") + p.fg(p.Red, fmt.Sprintf("-%d", del))
 }
 
-func (p palette) priorityBadge(pr string) string {
-	label := priorityLabel(pr)
+func (p palette) priorityColor(pr string) string {
 	switch pr {
 	case "P0":
-		return p.badge(p.Red, label)
+		return p.Red
 	case "P1":
-		return p.badge(p.Yellow, label)
+		return p.Yellow
 	case "P2":
-		return p.badge(p.Blue, label)
+		return p.Blue
 	default:
-		return p.badge(p.TextSecondary, label)
+		return p.TextSecondary
 	}
 }
 
-// checksRatio returns "passed/total" for a PR's check runs.
+func (p palette) priorityBadge(pr string) string {
+	return p.badge(p.priorityColor(pr), priorityLabel(pr))
+}
+
+// checksRatio returns "passed/total" for a PR's checks.
 func checksRatio(pr gh.PullRequest) string {
-	if len(pr.Checks) == 0 {
+	ok, _, total := pr.CheckCounts()
+	if total == 0 {
 		return ""
 	}
-	ok := 0
-	for _, c := range pr.Checks {
-		if c.State == gh.StateSuccess {
-			ok++
-		}
-	}
-	return fmt.Sprintf("%d/%d", ok, len(pr.Checks))
+	return fmt.Sprintf("%d/%d", ok, total)
 }
 
-// checksLabel is the design's CI chip text: "6/6 passed", "3/4 running", "2/3 (1 failed)".
+// checksLabel is the CI chip text: "6/6 passed", "3/4 running", "2 failing".
 func checksLabel(pr gh.PullRequest) string {
-	if len(pr.Checks) == 0 {
-		return ""
-	}
-	ok, failed := 0, 0
-	for _, c := range pr.Checks {
-		switch c.State {
-		case gh.StateSuccess:
-			ok++
-		case gh.StateFailure:
-			failed++
-		}
-	}
+	ok, failed, total := pr.CheckCounts()
 	switch {
+	case total == 0:
+		return ""
 	case failed > 0:
-		return fmt.Sprintf("%d/%d failing", ok, len(pr.Checks))
-	case ok < len(pr.Checks):
-		return fmt.Sprintf("%d/%d running", ok, len(pr.Checks))
+		return fmt.Sprintf("%d/%d failing", failed, total)
+	case ok < total:
+		return fmt.Sprintf("%d/%d running", total-ok, total)
 	default:
-		return fmt.Sprintf("%d/%d passed", ok, len(pr.Checks))
+		return fmt.Sprintf("%d/%d passed", ok, total)
 	}
 }
 
@@ -220,9 +222,13 @@ func priorityLabel(pr string) string {
 func (p palette) quickAction(pr gh.PullRequest) string {
 	switch {
 	case pr.NeedsMyReview && pr.ReviewDecision != gh.ReviewApproved:
-		return p.badge(p.Green, p.ic.CheckPass+" Approve")
+		return p.badge(p.Green, p.ic.CheckPass+" Review")
 	case pr.MergeReady():
 		return p.badge(p.Purple, p.ic.PRMerged+" Merge")
+	case pr.CIState == gh.StateFailure:
+		return p.badge(p.Red, p.ic.CheckFail+" Fix CI")
+	case pr.Conflicting:
+		return p.badge(p.Red, "Rebase")
 	default:
 		return p.badge(p.TextSecondary, "Inspect")
 	}
@@ -265,6 +271,36 @@ func fit(s string, w int) string {
 		s += strings.Repeat(" ", pad)
 	}
 	return s
+}
+
+// fitMid shortens s to w cells by cutting out its middle, keeping both ends (repo names such as
+// "acme-corp/service-api-v2" stay distinguishable: "acme-corp/se…api-v2").
+func fitMid(s string, w int) string {
+	if width(s) <= w || w < 5 {
+		return fit(s, w)
+	}
+	left := (w - 1) * 3 / 5
+	right := w - 1 - left
+	return fit(ansi.Truncate(s, left, "")+"\x1b[0m"+"…"+cutLeft(s, width(s)-right), w)
+}
+
+// optMark brackets an optional cell segment: tables drop it when the cell does not fit, before
+// truncating anything else; elsewhere sanitize strips the marker.
+const optMark = "\x1d"
+
+// optional marks s as a segment a table may drop when space is short.
+func optional(s string) string { return optMark + s + optMark }
+
+// dropOptional removes every optional segment from s.
+func dropOptional(s string) string {
+	parts := strings.Split(s, optMark)
+	var b strings.Builder
+	for i, part := range parts {
+		if i%2 == 0 {
+			b.WriteString(part)
+		}
+	}
+	return b.String()
 }
 
 // fitRight right-aligns s within w cells.
@@ -442,16 +478,6 @@ func sideBySide(a, b []string, w int) []string {
 	return out
 }
 
-// rule renders a labelled horizontal divider.
-func (p palette) rule(label string, w int) string {
-	head := p.bold(p.TextSecondary, label) + " "
-	n := w - width(head)
-	if n < 0 {
-		n = 0
-	}
-	return head + p.line(strings.Repeat("─", n))
-}
-
 // column describes one table column. width<0 marks a flex column whose share is weighted by -width;
 // drop>0 lets it be hidden when narrow (higher drops first).
 type column struct {
@@ -459,7 +485,8 @@ type column struct {
 	width int
 	right bool
 	drop  int
-	min   int // minimum width for flex columns (default flexMin)
+	min   int  // minimum width for flex columns (default flexMin)
+	mid   bool // truncate in the middle (repository names) instead of at the end
 }
 
 // cell joins a primary line and an optional secondary line for two-line table rows.
@@ -520,6 +547,11 @@ const colGap = 2
 
 // table renders an uppercase header strip plus rows windowed around sel, at most h lines.
 func (p palette) table(cols []column, rows [][]string, sel, w, h int, focused bool) []string {
+	return p.tableEmpty(cols, rows, sel, w, h, focused, "")
+}
+
+// tableEmpty is table with a custom message for when there are no rows.
+func (p palette) tableEmpty(cols []column, rows [][]string, sel, w, h int, focused bool, empty string) []string {
 	if h <= 0 || w <= 0 {
 		return nil
 	}
@@ -529,13 +561,15 @@ func (p palette) table(cols []column, rows [][]string, sel, w, h int, focused bo
 		active[i] = i
 	}
 	minOf := func(i int) int { return max(cols[i].min, flexMin) }
+	// Fixed columns are never narrower than their header, so titles are not cut off.
+	fixedW := func(i int) int { return max(cols[i].width, width(cols[i].title)) }
 	need := func(idx []int) int {
 		n := 1
 		for _, i := range idx {
 			if cols[i].width < 0 {
 				n += minOf(i) + colGap
 			} else {
-				n += cols[i].width + colGap
+				n += fixedW(i) + colGap
 			}
 		}
 		return n
@@ -560,8 +594,8 @@ func (p palette) table(cols []column, rows [][]string, sel, w, h int, focused bo
 			flex++
 			weights += -cols[i].width
 		} else {
-			fixed += cols[i].width + colGap
-			widths[i] = cols[i].width
+			fixed += fixedW(i) + colGap
+			widths[i] = fixedW(i)
 		}
 	}
 	if flex > 0 {
@@ -588,15 +622,32 @@ func (p palette) table(cols []column, rows [][]string, sel, w, h int, focused bo
 	}
 
 	sep := strings.Repeat(" ", colGap)
-	fmtCell := func(i int, s string) string {
-		if cols[i].right {
-			return fitRight(s, widths[i])
+	// fmtCell fits a cell line; only the main line of a middle-truncated column is cut in the middle.
+	fmtCell := func(i int, s string, main bool) string {
+		cw := widths[i]
+		if strings.Contains(s, optMark) {
+			if width(s) > cw {
+				s = dropOptional(s)
+			} else {
+				s = strings.ReplaceAll(s, optMark, "")
+			}
 		}
-		return fit(s, widths[i])
+		switch {
+		case cols[i].right:
+			return fitRight(s, cw)
+		case cols[i].mid && main:
+			return fitMid(s, cw)
+		}
+		return fit(s, cw)
 	}
 	var hdr []string
 	for _, i := range active {
-		hdr = append(hdr, fmtCell(i, strings.ToUpper(cols[i].title)))
+		t := strings.ToUpper(cols[i].title)
+		if cols[i].right {
+			hdr = append(hdr, fitRight(t, widths[i]))
+		} else {
+			hdr = append(hdr, fit(t, widths[i]))
+		}
 	}
 	out := []string{paint(p.bold(p.TextSecondary, " "+strings.Join(hdr, sep)), p.BgPrimary, w)}
 
@@ -605,7 +656,10 @@ func (p palette) table(cols []column, rows [][]string, sel, w, h int, focused bo
 		return out
 	}
 	if len(rows) == 0 {
-		return append(out, "", p.muted("  Nothing needs your attention here "+p.ic.CheckPass))
+		if empty == "" {
+			empty = "Nothing needs your attention here"
+		}
+		return append(out, "", "  "+p.fg(p.Green, p.ic.CheckPass)+" "+p.muted(empty))
 	}
 	hair := p.fg(blend(p.BorderMuted, p.BgSurface, 0.55), strings.Repeat("─", w))
 	start, mode := tableLayout(len(rows), sel, visible, rowsHaveSub(rows))
@@ -621,10 +675,15 @@ func (p palette) table(cols []column, rows [][]string, sel, w, h int, focused bo
 			}
 			m, s := splitCell(v)
 			if mode.lines == 1 && s != "" {
-				m += "  " + s
+				// Squeezed to one line: append the second line when it fits; middle-truncated columns
+				// (repository names) keep just their main line rather than mangling both.
+				joined := m + "  " + s
+				if !cols[i].mid || width(dropOptional(m))+2+width(dropOptional(s)) <= widths[i] {
+					m = joined
+				}
 			}
-			mains = append(mains, fmtCell(i, m))
-			subs = append(subs, fmtCell(i, s))
+			mains = append(mains, fmtCell(i, m, true))
+			subs = append(subs, fmtCell(i, s, false))
 		}
 		lines := []string{strings.Join(mains, sep)}
 		if mode.lines == 2 {
@@ -667,9 +726,24 @@ func wrap(s string, w, max int) []string {
 	}
 	if max > 0 && len(lines) > max {
 		lines = lines[:max]
-		lines[max-1] = fit(lines[max-1], w-1) + "…"
+		if last := strings.TrimRight(fit(lines[max-1], w-1), " "); strings.HasSuffix(last, "…") {
+			lines[max-1] = last
+		} else {
+			lines[max-1] = last + "…"
+		}
 	}
 	return lines
+}
+
+// plural formats a count with a singular or plural noun: plural(1, "job") = "1 job".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	if strings.HasSuffix(noun, "y") && !strings.HasSuffix(noun, "ey") {
+		return fmt.Sprintf("%d %sies", n, noun[:len(noun)-1])
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 func ago(t time.Time) string {
@@ -729,8 +803,8 @@ func commaInt(n int) string {
 
 // shortRepo drops the owner when it matches the viewer to save horizontal space.
 func shortRepo(repo, login string) string {
-	if strings.HasPrefix(repo, login+"/") {
-		return strings.TrimPrefix(repo, login+"/")
+	if login != "" && strings.HasPrefix(strings.ToLower(repo), strings.ToLower(login)+"/") {
+		return repo[len(login)+1:]
 	}
 	return repo
 }
