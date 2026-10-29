@@ -36,7 +36,6 @@ query GhxProfile {
     followers { totalCount }
     following { totalCount }
     starredRepositories { totalCount }
-    organizations(first: 8) { nodes { login } }
     socialAccounts(first: 4) { nodes { provider displayName url } }
     pinnedItems(first: 6, types: REPOSITORY) {
       nodes { ...ProfileRepo }
@@ -50,7 +49,7 @@ query GhxProfile {
       totalRepositoryContributions
       restrictedContributionsCount
       commitContributionsByRepository(maxRepositories: 6) {
-        repository { nameWithOwner }
+        repository { nameWithOwner isPrivate }
         contributions { totalCount }
       }
     }
@@ -139,12 +138,9 @@ type gqlProfile struct {
 			Emoji   string `json:"emoji"`
 			Message string `json:"message"`
 		} `json:"status"`
-		Followers     gqlTotal `json:"followers"`
-		Following     gqlTotal `json:"following"`
-		Starred       gqlTotal `json:"starredRepositories"`
-		Organizations struct {
-			Nodes []gqlLogin `json:"nodes"`
-		} `json:"organizations"`
+		Followers      gqlTotal `json:"followers"`
+		Following      gqlTotal `json:"following"`
+		Starred        gqlTotal `json:"starredRepositories"`
 		SocialAccounts struct {
 			Nodes []struct {
 				Provider    string `json:"provider"`
@@ -163,6 +159,7 @@ type gqlProfile struct {
 			CommitContributionsByRepo    []struct {
 				Repository struct {
 					NameWithOwner string `json:"nameWithOwner"`
+					IsPrivate     bool   `json:"isPrivate"`
 				} `json:"repository"`
 				Contributions gqlTotal `json:"contributions"`
 			} `json:"commitContributionsByRepository"`
@@ -188,9 +185,6 @@ func (c *Client) FetchProfile(ctx context.Context) (*Profile, error) {
 	}
 	if v.Status != nil {
 		p.StatusEmoji, p.StatusMessage = v.Status.Emoji, strings.TrimSpace(v.Status.Message)
-	}
-	for _, o := range v.Organizations.Nodes {
-		p.Orgs = append(p.Orgs, o.Login)
 	}
 	for _, s := range v.SocialAccounts.Nodes {
 		p.Socials = append(p.Socials, Social{Provider: s.Provider, Name: s.DisplayName, URL: s.URL})
@@ -233,16 +227,25 @@ func (c *Client) FetchProfile(ctx context.Context) (*Profile, error) {
 			}
 		}
 	}
+	// Private repositories stay out of the per-repository list (they are counted in PrivateContrib), so the
+	// tab, and any screenshot of it, shows what github.com shows visitors.
 	for _, r := range v.ContributionsCollection.CommitContributionsByRepo {
+		if r.Repository.IsPrivate {
+			continue
+		}
 		p.CommitRepos = append(p.CommitRepos, RepoContribution{Repo: r.Repository.NameWithOwner, Commits: r.Contributions.TotalCount})
 	}
 	sort.SliceStable(p.CommitRepos, func(i, j int) bool { return p.CommitRepos[i].Commits > p.CommitRepos[j].Commits })
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		p.Readme, _ = c.FetchProfileReadme(ctx, p.Login)
+	}()
+	go func() {
+		defer wg.Done()
+		p.Orgs, _ = c.FetchPublicOrgs(ctx, p.Login)
 	}()
 	go func() {
 		defer wg.Done()
@@ -250,6 +253,20 @@ func (c *Client) FetchProfile(ctx context.Context) (*Profile, error) {
 	}()
 	wg.Wait()
 	return p, nil
+}
+
+// FetchPublicOrgs lists the organizations a user shows publicly. GraphQL's viewer.organizations also
+// returns private memberships, which github.com hides from visitors and a shared screenshot must not reveal.
+func (c *Client) FetchPublicOrgs(ctx context.Context, login string) ([]string, error) {
+	var out []gqlLogin
+	if err := c.get(ctx, "/users/"+login+"/orgs?per_page=8", &out); err != nil {
+		return nil, err
+	}
+	orgs := make([]string, 0, len(out))
+	for _, o := range out {
+		orgs = append(orgs, o.Login)
+	}
+	return orgs, nil
 }
 
 // FetchProfileReadme returns the profile README (the <login>/<login> repository) as plain text,

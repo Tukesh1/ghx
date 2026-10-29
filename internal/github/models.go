@@ -48,10 +48,10 @@ type Profile struct {
 	Avatar                       *Pixels
 	CreatedAt                    time.Time
 	Followers, Following         int
-	Starred                      int // repositories the viewer starred
-	Repos                        int // repositories the viewer owns
-	StarsEarned, ForksEarned     int // across the viewer's own non-fork repositories
-	Orgs                         []string
+	Starred                      int      // repositories the viewer starred
+	Repos                        int      // repositories the viewer owns
+	StarsEarned, ForksEarned     int      // across the viewer's own non-fork repositories
+	Orgs                         []string // public organization memberships only
 	Socials                      []Social
 	Pinned                       []PinnedRepo
 	Popular                      bool       // Pinned holds the most-starred repositories because none are pinned

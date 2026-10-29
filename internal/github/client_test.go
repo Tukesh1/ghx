@@ -62,7 +62,8 @@ func fakeGitHub(t *testing.T, failing ...string) (*httptest.Server, *int32) {
 				"pinnedItems":{"nodes":[]},"allRepos":{"totalCount":4},
 				"owned":{"pageInfo":{"hasNextPage":true,"endCursor":"page2"},"nodes":[{"nameWithOwner":"mona/app","stargazerCount":7,"forkCount":2,"primaryLanguage":{"name":"Go","color":"#00add8"}},
 					{"nameWithOwner":"mona/secret","isPrivate":true,"stargazerCount":1}]},
-				"contributionsCollection":{"commitContributionsByRepository":[{"repository":{"nameWithOwner":"mona/app"},"contributions":{"totalCount":12}}]}}}}`, srv.URL)
+				"contributionsCollection":{"commitContributionsByRepository":[{"repository":{"nameWithOwner":"mona/app"},"contributions":{"totalCount":12}},
+					{"repository":{"nameWithOwner":"mona/secret","isPrivate":true},"contributions":{"totalCount":40}}]}}}}`, srv.URL)
 		case strings.Contains(req.Query, "query GhxOwnedRepos"):
 			// The second page of the viewer's repositories (more than 100 of them).
 			_, _ = w.Write([]byte(`{"data":{"viewer":{"owned":{"pageInfo":{"hasNextPage":false},
@@ -89,6 +90,9 @@ func fakeGitHub(t *testing.T, failing ...string) (*httptest.Server, *int32) {
 	})
 	mux.HandleFunc("/notifications", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`[{"id":"1","reason":"mention","subject":{"title":"Hi","type":"PullRequest","url":"https://api.github.com/repos/mona/app/pulls/4"},"repository":{"full_name":"mona/app"}}]`))
+	})
+	mux.HandleFunc("/users/mona/orgs", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"login":"public-org"}]`))
 	})
 	mux.HandleFunc("/repos/mona/mona/readme", func(w http.ResponseWriter, r *http.Request) {
 		body := base64.StdEncoding.EncodeToString([]byte("# Hi\n<img src=\"x.gif\">\nHello **world**"))
@@ -340,8 +344,12 @@ func TestFetchProfile(t *testing.T) {
 	if p.StarsEarned != 9 || p.ForksEarned != 2 || len(p.Languages) != 2 || p.Languages[0].Percent != 50 {
 		t.Errorf("stars %d forks %d languages %+v", p.StarsEarned, p.ForksEarned, p.Languages)
 	}
+	// Private repositories and private org memberships never appear: github.com hides them from visitors.
 	if len(p.CommitRepos) != 1 || p.CommitRepos[0].Commits != 12 {
 		t.Errorf("commit repos = %+v", p.CommitRepos)
+	}
+	if len(p.Orgs) != 1 || p.Orgs[0] != "public-org" {
+		t.Errorf("orgs = %v, want public memberships only", p.Orgs)
 	}
 	if p.Readme != "# Hi\n\nHello world" {
 		t.Errorf("readme = %q", p.Readme)
