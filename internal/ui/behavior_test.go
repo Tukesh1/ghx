@@ -98,7 +98,7 @@ func TestFailedRefreshBacksOff(t *testing.T) {
 	if m.data != live {
 		t.Error("data must survive a failed refresh")
 	}
-	if !(gaps[0] < gaps[1] && gaps[1] < gaps[2]) {
+	if gaps[0] >= gaps[1] || gaps[1] >= gaps[2] {
 		t.Errorf("retries should back off, got %v", gaps)
 	}
 	if !strings.Contains(m.status, "refresh failed") {

@@ -275,7 +275,7 @@ func (m Model) closeIssue() (tea.Model, tea.Cmd) {
 		func(mm *Model) {
 			var keep []gh.Issue
 			for _, i := range mm.data.Issues {
-				if !(i.Repo == is.Repo && i.Number == is.Number) {
+				if i.Repo != is.Repo || i.Number != is.Number {
 					keep = append(keep, i)
 				}
 			}

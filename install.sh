@@ -22,11 +22,18 @@ fail() {
 	exit 1
 }
 
+# download URL FILE [progress]. GitHub's download CDN sometimes leaves a connection hanging; without a
+# connect timeout that costs the OS default (75s on macOS) before anything happens. Fail fast and
+# retry instead: a retry usually lands on a healthy edge server.
 download() {
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL --retry 3 -o "$2" "$1"
+		progress=-sS
+		if [ "${3:-}" = progress ] && [ -t 2 ]; then
+			progress=-#
+		fi
+		curl -fL "$progress" --connect-timeout 10 --retry 4 --retry-delay 1 --retry-connrefused -o "$2" "$1"
 	elif command -v wget >/dev/null 2>&1; then
-		wget -q -O "$2" "$1"
+		wget -q --timeout=10 --tries=5 --waitretry=1 -O "$2" "$1"
 	else
 		fail "curl or wget is required"
 	fi
@@ -90,7 +97,7 @@ main() {
 	trap 'rm -rf "$tmp"' EXIT INT TERM
 
 	info "Downloading ghx ($VERSION) for $os/$arch"
-	download "$base/$asset" "$tmp/$asset" || fail "download failed: $base/$asset"
+	download "$base/$asset" "$tmp/$asset" progress || fail "download failed: $base/$asset"
 
 	if download "$base/checksums.txt" "$tmp/checksums.txt" 2>/dev/null; then
 		want=$(awk -v f="$asset" '$2 == f {print $1}' "$tmp/checksums.txt")

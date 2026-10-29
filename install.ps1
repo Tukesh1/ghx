@@ -5,6 +5,10 @@
 # Options: $env:GHX_VERSION = "v0.1.0"; $env:GHX_INSTALL_DIR = "C:\tools"
 
 $ErrorActionPreference = "Stop"
+# Windows PowerShell 5.1 redraws Invoke-WebRequest's progress bar for every packet, which makes downloads
+# many times slower; it also defaults to TLS 1.0, which GitHub rejects.
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $repo = "Tukesh1/ghx"
 $version = if ($env:GHX_VERSION) { $env:GHX_VERSION } else { "latest" }
 $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { throw "ghx needs a 64-bit Windows" }
@@ -16,9 +20,9 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("ghx-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     Write-Host "==> Downloading ghx ($version) for windows/$arch"
-    Invoke-WebRequest -UseBasicParsing "$base/$asset" -OutFile "$tmp\$asset"
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 "$base/$asset" -OutFile "$tmp\$asset"
     try {
-        Invoke-WebRequest -UseBasicParsing "$base/checksums.txt" -OutFile "$tmp\checksums.txt"
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 "$base/checksums.txt" -OutFile "$tmp\checksums.txt"
         $want = (Select-String -Path "$tmp\checksums.txt" -Pattern " $asset$").Line.Split(" ")[0]
         $got = (Get-FileHash "$tmp\$asset" -Algorithm SHA256).Hash.ToLower()
         if ($want -and $want -ne $got) { throw "checksum mismatch for $asset" }

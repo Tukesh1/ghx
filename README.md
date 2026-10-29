@@ -172,6 +172,7 @@ tools/screenshot      renders the README screenshots from the demo dataset
 | Header shows **⚠ N partial** | one section failed to load — the footer names it; ghx retries on the next refresh |
 | No notifications | fine-grained tokens can't read notifications; use `gh auth login` or a classic token |
 | Traffic says "needs push access" | GitHub only shares traffic with people who can push to the repository |
+| Install hangs before anything prints | GitHub's CDN (`raw.githubusercontent.com`) is slow or blocked on some networks. Use the mirror: `curl -fsSL https://cdn.jsdelivr.net/gh/Tukesh1/ghx@main/install.sh \| sh`, or `go install github.com/Tukesh1/ghx@latest` |
 | Layout looks cramped | ghx needs at least 80×24 and shines at 140×40 or larger |
 
 ## Contributing
